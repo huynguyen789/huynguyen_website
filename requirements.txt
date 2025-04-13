@@ -1,0 +1,6 @@
+beautifulsoup4 
+youtube_transcript_api 
+openai 
+streamlit 
+# anthropic 
+# google-generativeai
