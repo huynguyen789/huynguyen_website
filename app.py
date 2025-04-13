@@ -407,24 +407,38 @@ def search_and_summarize(query, model_choice, search_type, include_youtube=True,
     # Format the content for the prompt
     formatted_content = ""
     
+    # Create a source mapping for easier reference
+    source_mapping = {}
+    
     # Add website content
     for i, web_content in enumerate(website_contents, 1):
-        formatted_content += f"<website_{i}>\nTitle: {web_content['title']}\nURL: {web_content['link']}\n\n{web_content['content']}\n</website_{i}>\n\n"
+        source_id = f"website_{i}"
+        source_mapping[source_id] = web_content['link']
+        formatted_content += f"<{source_id}>\nTitle: {web_content['title']}\nURL: {web_content['link']}\nSource ID: {source_id}\n\n{web_content['content']}\n</{source_id}>\n\n"
     
     # Add YouTube content
     for i, yt_content in enumerate(youtube_contents, 1):
-        formatted_content += f"<youtube_video_{i}>\nTitle: {yt_content['title']}\nURL: {yt_content['link']}\n\n{yt_content['content']}\n</youtube_video_{i}>\n\n"
+        source_id = f"youtube_video_{i}"
+        source_mapping[source_id] = yt_content['link']
+        formatted_content += f"<{source_id}>\nTitle: {yt_content['title']}\nURL: {yt_content['link']}\nSource ID: {source_id}\n\n{yt_content['content']}\n</{source_id}>\n\n"
     
     # Create a combined content for display
     combined_content = []
-    for web_content in website_contents:
-        combined_content.append(f"[Website] {web_content['title']}\nURL: {web_content['link']}\n\n{web_content['content']}")
+    for i, web_content in enumerate(website_contents, 1):
+        source_id = f"website_{i}"
+        formatted_entry = f"[Website {i}] {web_content['title']}\nURL: {web_content['link']}\n\nSource ID: {source_id}\n\n{web_content['content']}"
+        combined_content.append(formatted_entry)
     
-    for yt_content in youtube_contents:
-        combined_content.append(f"[YouTube] {yt_content['title']}\nURL: {yt_content['link']}\n\n{yt_content['content']}")
+    for i, yt_content in enumerate(youtube_contents, 1):
+        source_id = f"youtube_video_{i}"
+        formatted_entry = f"[YouTube {i}] {yt_content['title']}\nURL: {yt_content['link']}\n\nSource ID: {source_id}\n\n{yt_content['content']}"
+        combined_content.append(formatted_entry)
     
     # Get today's date
     today_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # Create source reference section for clear citations
+    source_references = "\n".join([f"{source_id}: {url}" for source_id, url in source_mapping.items()])
     
     # Create the prompt with the template
     system_prompt = """<role>You are a world class search engine. 
@@ -435,7 +449,8 @@ Based on the web content and youtube transcripts, create a world-class summary t
 - <website_1>, <website_2>, etc.: Content from different websites
 - <youtube_video_1>, <youtube_video_2>, etc.: Transcripts from different YouTube videos
 
-Use this structure to understand which information comes from which source.
+Source Reference Map:
+{source_references}
 
 Today date: {today_date}
 
@@ -447,8 +462,15 @@ Be concise but include all of the important details.
 Give examples if possible.  
 Focus on high quality and accuracy: filter, compare, select from provided content to get the best answer! 
 If you dont have enough info, state so and give users links to look by themself. Do not make up info!  
-Always cite sources with the link in the answer(embed it if you can, so it's look nicer instead of the full long links). Which part come from which source as hyperlink.
-Output nicely in Markdown with clear tittles and contents. 
+
+IMPORTANT - For citations: 
+1. When citing a source, use proper markdown links: [text](URL)
+2. Replace references like "website_1" or "youtube_video_1" with actual clickable links
+3. Example: Instead of writing "According to [website_1]..." write "According to [this source](https://example.com)..."
+4. Use the source URLs in the references section above for your links
+5. NEVER use bracketed references like [website_1] in your final output
+
+Output nicely in Markdown with clear titles and contents.
 
 *** Important: For coding search:
 - If you found many different answers, code syntax, or approaches, alert & show them all to user. User can test out to see which one works(note to them that too)
@@ -516,7 +538,7 @@ If you done a great job, you will get a 100k bonus this year. If not a cat will 
     if 'additional_results' in locals():
         combined_search_results['additional_results'] = additional_results
 
-    return successful_website_count, successful_youtube_count, blocked_websites_count, '\n\n'.join(combined_content), summary, len('\n\n'.join(combined_content).split()), combined_search_results, access_stats
+    return successful_website_count, successful_youtube_count, blocked_websites_count, '\n\n'.join(combined_content), summary, len('\n\n'.join(combined_content).split()), combined_search_results, access_stats, source_mapping
 
 def search_page():
     """
@@ -572,6 +594,10 @@ def search_page():
     
     if search_button and query:
         try:
+            # Create placeholder containers for results
+            results_container = st.container()
+            
+            # Show searching status in a temporary status indicator
             with st.status("🔍 Searching...") as status:
                 # Search progress tracking
                 progress_text = st.empty()
@@ -584,7 +610,7 @@ def search_page():
                 
                 # Perform search
                 search_depth = "deep" if search_type == "Deep (10 sources)" else "fast"
-                websites_used, youtube_videos_used, blocked_count, combined_content, response, word_count, serper_results, access_stats = search_and_summarize(
+                websites_used, youtube_videos_used, blocked_count, combined_content, response, word_count, serper_results, access_stats, source_mapping = search_and_summarize(
                     query, model_choice, search_depth, include_youtube, update_progress
                 )
                 
@@ -592,12 +618,15 @@ def search_page():
                 st.session_state.search_history.append({
                     "query": query,
                     "response": response,
-                    "response_escaped": response.replace('#', '\\#').replace('>', '\\>'),  # Escape markdown characters
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "access_stats": access_stats
+                    "access_stats": access_stats,
+                    "combined_content": combined_content,
+                    "serper_results": serper_results,
+                    "source_mapping": source_mapping
                 })
-                
-                # Display results
+            
+            # Display results OUTSIDE the status block
+            with results_container:
                 total_successful = websites_used + youtube_videos_used
                 success_percentage = round((total_successful / access_stats['target_sources']) * 100)
                 
@@ -607,7 +636,7 @@ def search_page():
                     st.warning(f"Found {total_successful} of {access_stats['target_sources']} target sources ({success_percentage}%). {blocked_count} websites were blocked/inaccessible.")
                 
                 # Use tabs to separate results and sources
-                tabs = st.tabs(["📝 Summary", "🔍 Sources", "🚫 Blocked Sites", "🌐 Serper API"])
+                tabs = st.tabs(["📝 Summary", "🔍 Sources", "🚫 Blocked Sites", "🌐 Serper API", "🔧 Debug"])
                 
                 # First tab: Summary
                 with tabs[0]:
@@ -650,6 +679,26 @@ def search_page():
                 # Fourth tab: Serper API results
                 with tabs[3]:
                     st.json(serper_results)
+                
+                # Fifth tab: Debug information
+                with tabs[4]:
+                    st.write("#### Source Reference Map")
+                    
+                    # Use the source mapping directly
+                    for source_id, url in source_mapping.items():
+                        st.write(f"- **{source_id}**: [{url}]({url})")
+                    
+                    # Show example of correct citation format
+                    st.write("#### Proper Citation Example")
+                    if source_mapping:
+                        sample_source_id = list(source_mapping.keys())[0]
+                        sample_url = source_mapping[sample_source_id]
+                        st.write(f"Instead of writing: According to [{sample_source_id}]...")
+                        st.write(f"Write: According to [this source]({sample_url})...")
+                    
+                    # Display combined content as markdown
+                    st.write("#### Combined Content as Markdown")
+                    st.text_area("Raw Content for Debugging", combined_content, height=300)
                     
         except Exception as e:
             st.error(f"An error occurred during search: {str(e)}")
@@ -657,19 +706,20 @@ def search_page():
             
     # Show search history
     if st.session_state.search_history:
-        # Create a column for search history
-        history_col = st.container()
-        
-        # Create a column for displaying selected history item
-        result_col = st.container()
-        
-        # Set up session state for selected history item if not present
-        if 'selected_history_item' not in st.session_state:
-            st.session_state.selected_history_item = None
-        
-        # Display search history in first column
-        with history_col:
-            with st.expander("📚 Search History", expanded=False):
+        with st.expander("📚 Search History", expanded=False):
+            # Create a column for search history
+            history_col = st.container()
+            
+            # Create a column for displaying selected history item
+            result_col = st.container()
+            
+            # Set up session state for selected history item if not present
+            if 'selected_history_item' not in st.session_state:
+                st.session_state.selected_history_item = None
+            
+            
+            # Display search history in first column
+            with history_col:
                 for i, search in enumerate(reversed(st.session_state.search_history)):
                     col1, col2 = st.columns([3, 1])
                     with col1:
@@ -678,27 +728,44 @@ def search_page():
                         if st.button(f"View #{i+1}", key=f"view_{i}"):
                             st.session_state.selected_history_item = i
                     st.divider()
-        
-        # Display selected history item in second column
-        with result_col:
-            if st.session_state.selected_history_item is not None:
-                i = st.session_state.selected_history_item
-                search = list(reversed(st.session_state.search_history))[i]
-                st.subheader(f"Results for: {search['query']}")
-                
-                # Handle older search history items that don't have response_escaped
-                response_text = search['response']
-                st.markdown(response_text)
             
-                
-                if st.button("Clear Results", key="clear_results"):
-                    st.session_state.selected_history_item = None
-
-
-
-
-
-
+            # Display selected history item in second column
+            with result_col:
+                if st.session_state.selected_history_item is not None:
+                    i = st.session_state.selected_history_item
+                    search = list(reversed(st.session_state.search_history))[i]
+                    
+                    # Display success message
+                    st.success(f"Results for: {search['query']}")
+                    
+                    # Display the response directly without nested tabs or expanders
+                    st.markdown(search['response'])
+                    
+                    # Add tabs for additional information
+                    if 'combined_content' in search and 'serper_results' in search:
+                        details_tabs = st.tabs(["🔍 Sources", "🌐 Serper API", "🔧 Debug"])
+                        with details_tabs[0]:
+                            st.text_area("Raw Source Content", search['combined_content'], height=400)
+                        with details_tabs[1]:
+                            st.json(search['serper_results'])
+                        with details_tabs[2]:
+                            st.write("#### Source Reference Map")
+                            if 'source_mapping' in search:
+                                for source_id, url in search['source_mapping'].items():
+                                    st.write(f"- **{source_id}**: [{url}]({url})")
+                                    
+                                    # Show example of correct citation format
+                                    st.write("#### Proper Citation Example")
+                                    if search['source_mapping']:
+                                        sample_source_id = list(search['source_mapping'].keys())[0]
+                                        sample_url = search['source_mapping'][sample_source_id]
+                                        st.write(f"Instead of writing: According to [{sample_source_id}]...")
+                                        st.write(f"Write: According to [this source]({sample_url})...")
+                            else:
+                                st.warning("Source mapping not available for this search (likely an older search).")
+                        
+                        if st.button("Clear Results", key="clear_results"):
+                            st.session_state.selected_history_item = None
 
 def home_page():
     """
