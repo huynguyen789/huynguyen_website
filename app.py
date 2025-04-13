@@ -18,6 +18,9 @@ from requests.exceptions import Timeout
 import re
 import logging
 from openai import OpenAI
+# Import newspaper library for better content extraction
+from newspaper import Article
+import html2text
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +28,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+
+# Page configuration
 st.set_page_config(
     page_title="Huy Nguyen Portfolio",
     page_icon="👨‍💻",
@@ -49,8 +54,6 @@ MODEL_CONFIG = {
         "display_name": "Google Gemini 2.0 Flash Lite"
     }
 }
-
-# Page configuration
 
 
 # Initialize session state for navigation
@@ -83,41 +86,102 @@ def get_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: 
     except Exception as e:
         raise Exception(f"Error generating response with {model_name}: {str(e)}")
 
-def clean_content(soup):
+def clean_content(soup, url):
     """
-    Input: BeautifulSoup object
-    Process: Cleans HTML content by removing unnecessary elements and extracting relevant text
+    Input: BeautifulSoup object and the URL
+    Process: Uses multiple extraction methods to get the best content, preserving code blocks
     Output: Cleaned text content
     """
-    # Remove unnecessary elements
-    for element in soup(['script', 'style', 'nav', 'footer', 'header']):
-        element.decompose()
+    content = ""
+    html_content = str(soup)
+    
+    # Method 1: Try newspaper3k extraction first (good for articles)
+    try:
+        article = Article(url)
+        # Set html manually since we already have it
+        article.set_html(html_content)
+        article.parse()
+        if article.text and len(article.text) > 300:  # Only use if we got substantial content
+            content = article.text
+    except Exception as e:
+        logging.error(f"Newspaper extraction error: {str(e)}")
+    
+    # Method 2: Use html2text directly on the main content area
+    if not content or len(content) < 300:
+        try:
+            # Remove unnecessary elements first
+            for element in soup(['script', 'style', 'nav', 'footer', 'header']):
+                element.decompose()
+            
+            # Try to find the main content area
+            main_content = (
+                soup.find('div', id='main-outlet') or  
+                soup.find('main') or
+                soup.find('article') or
+                soup.find('div', class_='content') or
+                soup.find('div', id='content') or
+                soup.body  # Fallback to entire body if no specific content area found
+            )
+            
+            if main_content:
+                # Create an HTML2Text instance for converting HTML to markdown
+                h = html2text.HTML2Text()
+                h.ignore_links = False
+                h.ignore_images = True 
+                h.ignore_tables = False
+                h.preserve_newlines = True
+                # This is crucial for code blocks - prevents wrapping
+                h.body_width = 0
+                
+                # Convert HTML to markdown-like text (preserves code blocks)
+                content = h.handle(str(main_content))
+        except Exception as e:
+            logging.error(f"HTML2Text extraction error: {str(e)}")
+    
+    # Method 3: Fall back to a simpler BeautifulSoup extraction if others failed
+    if not content or len(content) < 300:
+        try:
+            # Find the main content again (since we already processed soup)
+            main_content = (
+                soup.find('div', id='main-outlet') or  
+                soup.find('main') or
+                soup.find('article') or
+                soup.find('div', class_='content') or
+                soup.find('div', id='content') or
+                soup.body
+            )
+            
+            if main_content:
+                # Extract code blocks first
+                code_blocks = []
+                for code_elem in main_content.find_all(['pre', 'code']):
+                    code_text = code_elem.get_text(strip=False)  # Preserve whitespace in code
+                    if code_text:
+                        code_blocks.append(f"```\n{code_text}\n```")
+                
+                # Extract text content
+                text_elements = []
+                for elem in main_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'blockquote']):
+                    text = elem.get_text(strip=True)
+                    if text:
+                        text_elements.append(text)
+                
+                if text_elements:
+                    content = '\n\n'.join(text_elements)
+                
+                # Add extracted code blocks
+                if code_blocks:
+                    content += '\n\n' + '\n\n'.join(code_blocks)
+        except Exception as e:
+            logging.error(f"BeautifulSoup extraction error: {str(e)}")
+    
+    return content if content else "No main content found."
 
-    # Try to find the main content area
-    main_content = (
-        soup.find('div', id='main-outlet') or  
-        soup.find('main') or
-        soup.find('article') or
-        soup.find('div', class_='content') or
-        soup.find('div', id='content') or
-        soup.body  # Fallback to entire body if no specific content area found
-    )
-
-    if main_content:
-        # Extract text from relevant elements
-        content = []
-        for elem in main_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'blockquote']):
-            text = elem.get_text(strip=True)
-            if text:
-                content.append(text)
-        return '\n\n'.join(content)
-    return "No main content found."
-
-def search_and_summarize(query, model_choice, search_type, progress_callback=None):
+def search_and_summarize(query, model_choice, search_type, include_youtube=True, progress_callback=None):
     """
-    Input: Search query, model choice, search type, and optional progress callback
-    Process: Searches web and YouTube for content and summarizes results
-    Output: Number of sources used, combined content, and AI summary
+    Input: Search query, model choice, search type, YouTube inclusion flag, and optional progress callback
+    Process: Searches web and YouTube for content and summarizes results, continuing until target number of sources is reached
+    Output: Number of sources used, blocked websites, combined content, AI summary, raw Serper API response, and word count
     """
     if progress_callback:
         progress_callback("Searching for web content...", 0.1)
@@ -143,47 +207,291 @@ def search_and_summarize(query, model_choice, search_type, progress_callback=Non
     if progress_callback:
         progress_callback("Processing search results...", 0.2)
 
-    combined_content = []
+    # Lists to store content from different sources
+    website_contents = []
+    youtube_contents = []
+    
+    # Counters
     successful_website_count = 0
     successful_youtube_count = 0
-    total_links = 5 if search_type == "fast" else 10
+    blocked_websites_count = 0
+    failed_youtube_count = 0
+    
+    # Lists to store blocked/failed URLs
+    blocked_websites = []
+    failed_youtube = []
+    
+    # Define target number of successful sources (websites + YouTube videos)
+    target_sources = 5 if search_type == "fast" else 10
+    
+    # Safety limit to prevent infinite processing if most sites are blocked
+    max_attempts = 30
+    total_attempted = 0
+    processed_urls = set()  # Track URLs we've already processed to avoid duplicates
 
-    for rank, result in enumerate(search_results['organic'][:total_links], 1):
-        progress = 0.2 + (0.5 * rank / total_links)
+    # Process search results until we reach target number of sources or max attempts
+    for rank, result in enumerate(search_results['organic'], 1):
+        # Skip if we've already processed this URL
+        if result['link'] in processed_urls:
+            continue
+            
+        processed_urls.add(result['link'])
+        total_attempted += 1
+        
+        # Safety check to avoid infinite loops
+        if total_attempted >= max_attempts:
+            break
+            
+        # Calculate progress percentage (adjust to account for more possible attempts)
+        progress = 0.2 + (0.6 * min(total_attempted, target_sources) / target_sources)
         
         try:
-            if 'youtube.com' in result['link']:
+            if 'youtube.com' in result['link'] and include_youtube:
                 if progress_callback:
-                    progress_callback(f"Processing YouTube video {successful_youtube_count + 1}", progress)
+                    progress_callback(f"Processing YouTube video {successful_youtube_count + 1} (attempt {total_attempted})", progress)
                 
                 video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', result['link'])
                 if video_id_match:
                     transcript = YouTubeTranscriptApi.get_transcript(video_id_match.group(1))
                     transcript_text = ' '.join([entry['text'] for entry in transcript])
-                    combined_content.append(f"[YouTube] {result['title']}\n{transcript_text}")
+                    youtube_contents.append({
+                        'title': result.get('title', 'YouTube Video'),
+                        'link': result['link'],
+                        'content': transcript_text
+                    })
                     successful_youtube_count += 1
+                else:
+                    failed_youtube.append(result['link'])
+                    failed_youtube_count += 1
             else:
                 if progress_callback:
-                    progress_callback(f"Processing website {successful_website_count + 1}", progress)
+                    progress_callback(f"Processing website {successful_website_count + 1} (attempt {total_attempted})", progress)
                 
-                page_response = requests.get(result['link'], timeout=5)
-                soup = BeautifulSoup(page_response.content, 'html.parser')
-                content = clean_content(soup)
-                combined_content.append(f"[Website] {result['link']}\n{content}")
-                successful_website_count += 1
+                try:
+                    page_response = requests.get(result['link'], timeout=5)
+                    page_response.raise_for_status()  # Check for HTTP errors
+                    
+                    if page_response.status_code == 200:
+                        soup = BeautifulSoup(page_response.content, 'html.parser')
+                        content = clean_content(soup, result['link'])
+                        if content and content != "No main content found.":
+                            website_contents.append({
+                                'title': result.get('title', 'Website'),
+                                'link': result['link'],
+                                'content': content
+                            })
+                            successful_website_count += 1
+                        else:
+                            blocked_websites.append(result['link'])
+                            blocked_websites_count += 1
+                    else:
+                        blocked_websites.append(result['link'])
+                        blocked_websites_count += 1
+                except requests.exceptions.RequestException as e:
+                    # Handle various request exceptions (timeout, connection error, etc.)
+                    blocked_websites.append(result['link'])
+                    blocked_websites_count += 1
                 
         except Exception as e:
+            if 'youtube.com' in result.get('link', ''):
+                failed_youtube.append(result['link'])
+                failed_youtube_count += 1
+            else:
+                blocked_websites.append(result['link'])
+                blocked_websites_count += 1
             continue
+            
+        # Check if we've reached our target
+        total_successful = successful_website_count + successful_youtube_count
+        if total_successful >= target_sources:
+            break
+            
+    # If we didn't reach our target and there might be more results, consider making another search with a modified query
+    if (successful_website_count + successful_youtube_count < target_sources) and (total_attempted < max_attempts):
+        if progress_callback:
+            progress_callback(f"Not enough sources found. Attempting to find more results...", 0.7)
+        
+        # You could implement pagination or modified queries here if needed
+        # This is a simple example - you might want to add more sophisticated handling
+        try:
+            # Add a refinement to the query to get different results
+            refined_query = f"{query} more information"
+            payload = json.dumps({"q": refined_query})
+            response = requests.post(url, headers=headers, data=payload)
+            additional_results = response.json()
+            
+            if 'organic' in additional_results:
+                # Process additional results (similar logic as above)
+                for rank, result in enumerate(additional_results['organic'], 1):
+                    # Skip if we've already processed this URL
+                    if result['link'] in processed_urls:
+                        continue
+                        
+                    processed_urls.add(result['link'])
+                    total_attempted += 1
+                    
+                    # Safety check
+                    if total_attempted >= max_attempts:
+                        break
+                        
+                    # Calculate progress
+                    progress = 0.2 + (0.6 * min(total_attempted, target_sources) / target_sources)
+                    
+                    # Same processing logic as above
+                    try:
+                        if 'youtube.com' in result['link'] and include_youtube:
+                            if progress_callback:
+                                progress_callback(f"Processing additional YouTube video {successful_youtube_count + 1} (attempt {total_attempted})", progress)
+                            
+                            video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', result['link'])
+                            if video_id_match:
+                                transcript = YouTubeTranscriptApi.get_transcript(video_id_match.group(1))
+                                transcript_text = ' '.join([entry['text'] for entry in transcript])
+                                youtube_contents.append({
+                                    'title': result.get('title', 'YouTube Video'),
+                                    'link': result['link'],
+                                    'content': transcript_text
+                                })
+                                successful_youtube_count += 1
+                            else:
+                                failed_youtube.append(result['link'])
+                                failed_youtube_count += 1
+                        else:
+                            if progress_callback:
+                                progress_callback(f"Processing additional website {successful_website_count + 1} (attempt {total_attempted})", progress)
+                            
+                            try:
+                                page_response = requests.get(result['link'], timeout=5)
+                                page_response.raise_for_status()
+                                
+                                if page_response.status_code == 200:
+                                    soup = BeautifulSoup(page_response.content, 'html.parser')
+                                    content = clean_content(soup, result['link'])
+                                    if content and content != "No main content found.":
+                                        website_contents.append({
+                                            'title': result.get('title', 'Website'),
+                                            'link': result['link'],
+                                            'content': content
+                                        })
+                                        successful_website_count += 1
+                                    else:
+                                        blocked_websites.append(result['link'])
+                                        blocked_websites_count += 1
+                                else:
+                                    blocked_websites.append(result['link'])
+                                    blocked_websites_count += 1
+                            except requests.exceptions.RequestException as e:
+                                blocked_websites.append(result['link'])
+                                blocked_websites_count += 1
+                            
+                    except Exception as e:
+                        if 'youtube.com' in result.get('link', ''):
+                            failed_youtube.append(result['link'])
+                            failed_youtube_count += 1
+                        else:
+                            blocked_websites.append(result['link'])
+                            blocked_websites_count += 1
+                        continue
+                        
+                    # Check if we've reached our target
+                    total_successful = successful_website_count + successful_youtube_count
+                    if total_successful >= target_sources:
+                        break
+        except Exception as e:
+            # If the additional search fails, just continue with what we have
+            logging.error(f"Additional search error: {str(e)}")
 
     if progress_callback:
         progress_callback("Generating summary...", 0.8)
+        
+    # Format the content for the prompt
+    formatted_content = ""
+    
+    # Add website content
+    for i, web_content in enumerate(website_contents, 1):
+        formatted_content += f"<website_{i}>\nTitle: {web_content['title']}\nURL: {web_content['link']}\n\n{web_content['content']}\n</website_{i}>\n\n"
+    
+    # Add YouTube content
+    for i, yt_content in enumerate(youtube_contents, 1):
+        formatted_content += f"<youtube_video_{i}>\nTitle: {yt_content['title']}\nURL: {yt_content['link']}\n\n{yt_content['content']}\n</youtube_video_{i}>\n\n"
+    
+    # Create a combined content for display
+    combined_content = []
+    for web_content in website_contents:
+        combined_content.append(f"[Website] {web_content['title']}\nURL: {web_content['link']}\n\n{web_content['content']}")
+    
+    for yt_content in youtube_contents:
+        combined_content.append(f"[YouTube] {yt_content['title']}\nURL: {yt_content['link']}\n\n{yt_content['content']}")
+    
+    # Get today's date
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # Create the prompt with the template
+    system_prompt = """<role>You are a world class search engine. 
+Based on the web content and youtube transcripts, create a world-class summary to answer the user query.</role>
+"""
+
+    prompt_template = f"""<instructions>The content is organized with tags to indicate different sources:
+- <website_1>, <website_2>, etc.: Content from different websites
+- <youtube_video_1>, <youtube_video_2>, etc.: Transcripts from different YouTube videos
+
+Use this structure to understand which information comes from which source.
+
+Today date: {today_date}
+
+User Query: {query}
+
+Carefully think based on the user query and content to generate a world-class answer.
+Output format: First generate a short answer, then create a detail answer. With clear title for both.
+Be concise but include all of the important details. 
+Give examples if possible.  
+Focus on high quality and accuracy: filter, compare, select from provided content to get the best answer! 
+If you dont have enough info, state so and give users links to look by themself. Do not make up info!  
+Always cite sources with the link in the answer(embed it if you can, so it's look nicer instead of the full long links). Which part come from which source as hyperlink.
+Output nicely in Markdown with clear tittles and contents. 
+
+*** Important: For coding search:
+- If you found many different answers, code syntax, or approaches, alert & show them all to user. User can test out to see which one works(note to them that too)
+- Pay more attention to date on the content for the newest code version and show the user that info too.
+- Example: If you found 2 results: 
+        Old and wrong way:
+        response = openai.ChatCompletion.create(
+            model=model,
+            messages=[
+                {{"role": "user", "content": prompt}}
+            ]
+        )
+
+        New and correct way:
+        from openai import OpenAI
+        client = OpenAI()
+
+        completion = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {{"role": "system", "content": "You are a helpful assistant."}},
+            {{"role": "user", "content": "Hello!"}}
+        ]
+        )
+
+        print(completion.choices[0].message.content)
+
+        Alert & show the user both examples so they can select from!
+
+If you done a great job, you will get a 100k bonus this year. If not a cat will die.
+</instructions>
+
+<content>
+{formatted_content}
+</content>
+"""
 
     # Use the model to generate a summary
     try:
         summary = get_response(
-            f"Summarize this information:\n\n{'\n\n'.join(combined_content)}",
+            prompt_template,
             model_name=model_choice,
-            system_prompt="You are a helpful AI assistant that provides clear, accurate summaries of information."
+            system_prompt=system_prompt
         )
     except Exception as e:
         raise Exception(f"Summary generation error: {str(e)}")
@@ -191,11 +499,215 @@ def search_and_summarize(query, model_choice, search_type, progress_callback=Non
     if progress_callback:
         progress_callback("Complete!", 1.0)
 
-    return successful_website_count, successful_youtube_count, '\n\n'.join(combined_content), summary, len('\n\n'.join(combined_content).split())
+    # Create a structured result object
+    access_stats = {
+        "target_sources": target_sources,
+        "total_attempted": total_attempted,
+        "successful_websites": successful_website_count,
+        "successful_youtube": successful_youtube_count,
+        "blocked_websites": blocked_websites_count,
+        "failed_youtube": failed_youtube_count,
+        "blocked_urls": blocked_websites,
+        "failed_youtube_urls": failed_youtube
+    }
+
+    # Include both original and any additional search results
+    combined_search_results = search_results
+    if 'additional_results' in locals():
+        combined_search_results['additional_results'] = additional_results
+
+    return successful_website_count, successful_youtube_count, blocked_websites_count, '\n\n'.join(combined_content), summary, len('\n\n'.join(combined_content).split()), combined_search_results, access_stats
+
+def search_page():
+    """
+    Input: None
+    Process: Handles the search page UI and functionality
+    Output: Renders the search page interface
+    """
+    st.title("AI-Powered Search Assistant 🔍")
+    st.write("Get comprehensive answers from multiple web sources and YouTube videos.")
+    
+    # Initialize include_youtube in session state if not present
+    if 'include_youtube' not in st.session_state:
+        st.session_state.include_youtube = True
+    
+    # Search interface
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        query = st.text_input("🔍 Enter your search query:", 
+                            placeholder="How's the weather in San Francisco?",
+                            help="Be specific for better results")
+    with col2:
+        search_type = st.selectbox("Search Depth:", 
+                                 ["Quick (5 sources)", "Deep (10 sources)"],
+                                 help="Deep search takes longer but provides more comprehensive results")
+    
+    # Model selection and search button in same row
+    col3, col4, col5 = st.columns([2, 2, 1])
+    with col3:
+        model_options = list(MODEL_CONFIG.keys())
+        model_labels = [MODEL_CONFIG[model]["display_name"] for model in model_options]
+        default_model_index = model_options.index("google/gemini-2.0-flash-lite-001")
+        model_index = st.selectbox(
+            "AI Model:", 
+            range(len(model_options)),
+            index=default_model_index,
+            format_func=lambda i: model_labels[i],
+            help="Different models may provide different perspectives"
+        )
+        model_choice = model_options[model_index]
+    with col4:
+        include_youtube = st.checkbox("Include YouTube content", 
+                                    value=st.session_state.include_youtube,
+                                    help="Include transcripts from relevant YouTube videos",
+                                    key="include_youtube_checkbox")
+        # Update session state
+        st.session_state.include_youtube = include_youtube
+    with col5:
+        search_button = st.button("🔎 Search", use_container_width=True)
+    
+    # Initialize session state for search history
+    if 'search_history' not in st.session_state:
+        st.session_state.search_history = []
+    
+    if search_button and query:
+        try:
+            with st.status("🔍 Searching...") as status:
+                # Search progress tracking
+                progress_text = st.empty()
+                progress_bar = st.progress(0)
+                
+                def update_progress(message, progress):
+                    progress_text.text(message)
+                    progress_bar.progress(progress)
+                    status.update(label=message)
+                
+                # Perform search
+                search_depth = "deep" if search_type == "Deep (10 sources)" else "fast"
+                websites_used, youtube_videos_used, blocked_count, combined_content, response, word_count, serper_results, access_stats = search_and_summarize(
+                    query, model_choice, search_depth, include_youtube, update_progress
+                )
+                
+                # Add to search history
+                st.session_state.search_history.append({
+                    "query": query,
+                    "response": response,
+                    "response_escaped": response.replace('#', '\\#').replace('>', '\\>'),  # Escape markdown characters
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "access_stats": access_stats
+                })
+                
+                # Display results
+                total_successful = websites_used + youtube_videos_used
+                success_percentage = round((total_successful / access_stats['target_sources']) * 100)
+                
+                if total_successful >= access_stats['target_sources']:
+                    st.success(f"Success! Found all {access_stats['target_sources']} target sources ({websites_used} websites and {youtube_videos_used} YouTube videos).")
+                else:
+                    st.warning(f"Found {total_successful} of {access_stats['target_sources']} target sources ({success_percentage}%). {blocked_count} websites were blocked/inaccessible.")
+                
+                # Use tabs to separate results and sources
+                tabs = st.tabs(["📝 Summary", "🔍 Sources", "🚫 Blocked Sites", "🌐 Serper API"])
+                
+                # First tab: Summary
+                with tabs[0]:
+                    st.markdown(response)
+                
+                # Second tab: Source details
+                with tabs[1]:
+                    st.text_area("Raw Source Content", combined_content, height=400)
+                
+                # Third tab: Blocked sites
+                with tabs[2]:
+                    st.write(f"#### Access Statistics")
+                    
+                    # Calculate success rate
+                    success_rate = 0
+                    if access_stats['target_sources'] > 0:
+                        success_rate = round((access_stats['successful_websites'] + access_stats['successful_youtube']) / access_stats['target_sources'] * 100)
+                    
+                    # Display target information
+                    st.write(f"Target sources: {access_stats['target_sources']}")
+                    st.write(f"Successfully accessed: {access_stats['successful_websites'] + access_stats['successful_youtube']} ({success_rate}%)")
+                    
+                    # Display detailed statistics
+                    st.write(f"Total attempts: {access_stats['total_attempted']}")
+                    st.write(f"Successful websites: {access_stats['successful_websites']}")
+                    st.write(f"Successful YouTube videos: {access_stats['successful_youtube']}")
+                    st.write(f"Blocked/inaccessible websites: {access_stats['blocked_websites']}")
+                    st.write(f"Failed YouTube videos: {access_stats['failed_youtube']}")
+                    
+                    if access_stats['blocked_urls']:
+                        st.write("#### Blocked Website URLs:")
+                        for url in access_stats['blocked_urls']:
+                            st.write(f"- {url}")
+                    
+                    if access_stats['failed_youtube_urls']:
+                        st.write("#### Failed YouTube URLs:")
+                        for url in access_stats['failed_youtube_urls']:
+                            st.write(f"- {url}")
+                
+                # Fourth tab: Serper API results
+                with tabs[3]:
+                    st.json(serper_results)
+                    
+        except Exception as e:
+            st.error(f"An error occurred during search: {str(e)}")
+            logging.error(f"Search error: {str(e)}", exc_info=True)  # Log the full exception
+            
+    # Show search history
+    if st.session_state.search_history:
+        # Create a column for search history
+        history_col = st.container()
+        
+        # Create a column for displaying selected history item
+        result_col = st.container()
+        
+        # Set up session state for selected history item if not present
+        if 'selected_history_item' not in st.session_state:
+            st.session_state.selected_history_item = None
+        
+        # Display search history in first column
+        with history_col:
+            with st.expander("📚 Search History", expanded=False):
+                for i, search in enumerate(reversed(st.session_state.search_history)):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(f"**{search['timestamp']}**: {search['query']}")
+                    with col2:
+                        if st.button(f"View #{i+1}", key=f"view_{i}"):
+                            st.session_state.selected_history_item = i
+                    st.divider()
+        
+        # Display selected history item in second column
+        with result_col:
+            if st.session_state.selected_history_item is not None:
+                i = st.session_state.selected_history_item
+                search = list(reversed(st.session_state.search_history))[i]
+                st.subheader(f"Results for: {search['query']}")
+                
+                # Handle older search history items that don't have response_escaped
+                response_text = search['response']
+                st.markdown(response_text)
+            
+                
+                if st.button("Clear Results", key="clear_results"):
+                    st.session_state.selected_history_item = None
 
 
 
 
+
+
+
+def home_page():
+    """
+    Input: None
+    Process: Handles the home page UI and functionality
+    Output: Renders the home page interface
+    """
+    st.write("## Welcome to My Portfolio!")
+    st.write("I am a passionate developer with expertise in...")
 
 def main():
     # Sidebar navigation
@@ -213,142 +725,9 @@ def main():
     
     # Page content based on selection
     if st.session_state.current_page == "Home":
-        st.write("## Welcome to My Portfolio!")
-        st.write("I am a passionate developer with expertise in...")
-
-
+        home_page()
     elif st.session_state.current_page == "Search":
-        st.title("AI-Powered Search Assistant 🔍")
-        st.write("Get comprehensive answers from multiple web sources and YouTube videos.")
-        
-        # Example queries section
-        with st.expander("📝 Example Queries", expanded=False):
-            st.markdown("""
-            Try these example queries:
-            - "Latest developments in quantum computing 2024"
-            - "Best practices for cybersecurity in cloud computing"
-            - "How to implement zero trust architecture"
-            - "Recent advancements in AI for healthcare"
-            """)
-        
-        # Search interface
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            query = st.text_input("🔍 Enter your search query:", 
-                                placeholder="What would you like to learn about?",
-                                help="Be specific for better results")
-        with col2:
-            search_type = st.selectbox("Search Depth:", 
-                                     ["Quick (5 sources)", "Deep (10 sources)"],
-                                     help="Deep search takes longer but provides more comprehensive results")
-        
-        # Model selection and search button in same row
-        col3, col4, col5 = st.columns([2, 2, 1])
-        with col3:
-            model_options = list(MODEL_CONFIG.keys())
-            model_labels = [MODEL_CONFIG[model]["display_name"] for model in model_options]
-            model_index = st.selectbox(
-                "AI Model:", 
-                range(len(model_options)),
-                format_func=lambda i: model_labels[i],
-                help="Different models may provide different perspectives"
-            )
-            model_choice = model_options[model_index]
-        with col4:
-            include_youtube = st.checkbox("Include YouTube content", 
-                                        value=True,
-                                        help="Include transcripts from relevant YouTube videos")
-        with col5:
-            search_button = st.button("🔎 Search", use_container_width=True)
-        
-        # Initialize session state for search history
-        if 'search_history' not in st.session_state:
-            st.session_state.search_history = []
-        
-        if search_button and query:
-            try:
-                with st.status("🔍 Searching...") as status:
-                    # Search progress tracking
-                    progress_text = st.empty()
-                    progress_bar = st.progress(0)
-                    
-                    def update_progress(message, progress):
-                        progress_text.text(message)
-                        progress_bar.progress(progress)
-                        status.update(label=message)
-                    
-                    # Perform search
-                    search_depth = "deep" if search_type == "Deep (10 sources)" else "fast"
-                    websites_used, youtube_videos_used, combined_content, response, word_count = search_and_summarize(
-                        query, model_choice, search_depth, update_progress
-                    )
-                    
-                    # Add to search history
-                    st.session_state.search_history.append({
-                        "query": query,
-                        "response": response,
-                        "response_escaped": response.replace('#', '\\#').replace('>', '\\>'),  # Escape markdown characters
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                    
-                    # Display results
-                    st.success(f"Found information from {websites_used} websites and {youtube_videos_used} YouTube videos")
-                    
-                    # Use tabs to separate results and sources
-                    tabs = st.tabs(["📝 Summary", "🔍 Sources"])
-                    
-                    # First tab: Summary
-                    with tabs[0]:
-                        st.markdown(response)
-                    
-                    # Second tab: Source details
-                    with tabs[1]:
-                        st.text_area("Raw Source Content", combined_content, height=400)
-                        
-            except Exception as e:
-                st.error(f"An error occurred during search: {str(e)}")
-                logging.error(f"Search error: {str(e)}", exc_info=True)  # Log the full exception
-                
-        # Show search history
-        if st.session_state.search_history:
-            # Create a column for search history
-            history_col = st.container()
-            
-            # Create a column for displaying selected history item
-            result_col = st.container()
-            
-            # Set up session state for selected history item if not present
-            if 'selected_history_item' not in st.session_state:
-                st.session_state.selected_history_item = None
-            
-            # Display search history in first column
-            with history_col:
-                with st.expander("📚 Search History", expanded=False):
-                    for i, search in enumerate(reversed(st.session_state.search_history)):
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.markdown(f"**{search['timestamp']}**: {search['query']}")
-                        with col2:
-                            if st.button(f"View #{i+1}", key=f"view_{i}"):
-                                st.session_state.selected_history_item = i
-                        st.divider()
-            
-            # Display selected history item in second column
-            with result_col:
-                if st.session_state.selected_history_item is not None:
-                    i = st.session_state.selected_history_item
-                    search = list(reversed(st.session_state.search_history))[i]
-                    st.subheader(f"Results for: {search['query']}")
-                    
-                    # Handle older search history items that don't have response_escaped
-                    response_text = search['response']
-                    
-                    # Use text area instead of markdown to prevent rendering nested UI elements
-                    st.markdown(response_text)
-                 
-                    
-                    if st.button("Clear Results", key="clear_results"):
-                        st.session_state.selected_history_item = None
+        search_page()
 
 if __name__ == "__main__":
     main()
