@@ -5,6 +5,7 @@ Logic:
 - Manages page navigation through session state
 - Provides search functionality with web and YouTube sources
 - Uses synchronous functions for operations
+- Uses OpenRouter API for AI model access
 """
 
 import streamlit as st
@@ -17,64 +18,67 @@ from requests.exceptions import Timeout
 import re
 import logging
 from openai import OpenAI
-from anthropic import Anthropic
-import google.generativeai as genai
 
-# Initialize API clients
-openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-anthropic_client = Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+# Configure logging
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
-# Page configuration
 st.set_page_config(
     page_title="Huy Nguyen Portfolio",
     page_icon="👨‍💻",
     layout="wide"
 )
 
+# Model configuration
+MODEL_CONFIG = {
+    "openai/gpt-4o": {
+        "display_name": "OpenAI GPT-4o"
+    },
+    "anthropic/claude-3.7-sonnet": {
+        "display_name": "Anthropic Claude 3.7 Sonnet"
+    },
+    "google/gemini-2.0-flash-001": {
+        "display_name": "Google Gemini 2.0 Flash"
+    },
+    "google/gemini-2.5-pro-preview-03-25": {
+        "display_name": "Google Gemini 2.5 Pro"
+    },
+    "google/gemini-2.0-flash-lite-001": {
+        "display_name": "Google Gemini 2.0 Flash Lite"
+    }
+}
+
+# Page configuration
+
+
 # Initialize session state for navigation
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 'Home'
 
-def generate_response(model_name: str, prompt: str, system_prompt: str = None):
+def get_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
     """
-    Input: model name, prompt, and optional system prompt
-    Process: Generates response using specified AI model
+    Input: prompt, optional model name, and optional system prompt
+    Process: Generates response using OpenRouter API with specified model
     Output: Generated text response
     """
     try:
-        if model_name == "gemini-pro":
-            genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            model = genai.GenerativeModel('gemini-1.5-pro-002')
-            response = model.generate_content(prompt)
-            return response.text
-            
-        elif model_name == "claude":
-            messages = [{"role": "user", "content": prompt}]
-            if system_prompt:
-                messages.insert(0, {"role": "system", "content": system_prompt})
-                
-            response = anthropic_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=4096,
-                temperature=0,
-                messages=messages
-            )
-            return response.content[0].text
-            
-        elif model_name in ["gpt4", "gpt4o"]:
-            messages = [{"role": "user", "content": prompt}]
-            if system_prompt:
-                messages.insert(0, {"role": "system", "content": system_prompt})
-                
-            response = openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                temperature=0
-            )
-            return response.choices[0].message.content
-            
-        else:
-            raise ValueError(f"Unsupported model: {model_name}")
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=st.secrets["OPENROUTER_API_KEY"],
+        )
+        
+        messages = [{"role": "user", "content": prompt}]
+        if system_prompt:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+        
+        completion = client.chat.completions.create(
+            model=model_name,
+            messages=messages
+        )
+        
+        return completion.choices[0].message.content
             
     except Exception as e:
         raise Exception(f"Error generating response with {model_name}: {str(e)}")
@@ -176,9 +180,9 @@ def search_and_summarize(query, model_choice, search_type, progress_callback=Non
 
     # Use the model to generate a summary
     try:
-        summary = generate_response(
-            model_choice,
+        summary = get_response(
             f"Summarize this information:\n\n{'\n\n'.join(combined_content)}",
+            model_name=model_choice,
             system_prompt="You are a helpful AI assistant that provides clear, accurate summaries of information."
         )
     except Exception as e:
@@ -189,13 +193,17 @@ def search_and_summarize(query, model_choice, search_type, progress_callback=Non
 
     return successful_website_count, successful_youtube_count, '\n\n'.join(combined_content), summary, len('\n\n'.join(combined_content).split())
 
+
+
+
+
 def main():
     # Sidebar navigation
     with st.sidebar:
         st.title("Navigation")
         selected_page = st.radio(
             "Go to",
-            ["Home", "Works", "Track Record", "Search"],
+            ["Home", "Search"],
             key="navigation"
         )
         st.session_state.current_page = selected_page
@@ -207,14 +215,7 @@ def main():
     if st.session_state.current_page == "Home":
         st.write("## Welcome to My Portfolio!")
         st.write("I am a passionate developer with expertise in...")
-        
-    elif st.session_state.current_page == "Works":
-        st.write("## My Projects")
-        st.write("Here are some of my notable projects...")
-        
-    elif st.session_state.current_page == "Track Record":
-        st.write("## Professional Experience")
-        st.write("My professional journey includes...")
+
 
     elif st.session_state.current_page == "Search":
         st.title("AI-Powered Search Assistant 🔍")
@@ -244,9 +245,15 @@ def main():
         # Model selection and search button in same row
         col3, col4, col5 = st.columns([2, 2, 1])
         with col3:
-            model_choice = st.selectbox("AI Model:", 
-                                      ["gpt4o", "claude", "gemini-pro"],
-                                      help="Different models may provide different perspectives")
+            model_options = list(MODEL_CONFIG.keys())
+            model_labels = [MODEL_CONFIG[model]["display_name"] for model in model_options]
+            model_index = st.selectbox(
+                "AI Model:", 
+                range(len(model_options)),
+                format_func=lambda i: model_labels[i],
+                help="Different models may provide different perspectives"
+            )
+            model_choice = model_options[model_index]
         with col4:
             include_youtube = st.checkbox("Include YouTube content", 
                                         value=True,
@@ -280,31 +287,68 @@ def main():
                     st.session_state.search_history.append({
                         "query": query,
                         "response": response,
+                        "response_escaped": response.replace('#', '\\#').replace('>', '\\>'),  # Escape markdown characters
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     })
                     
                     # Display results
                     st.success(f"Found information from {websites_used} websites and {youtube_videos_used} YouTube videos")
                     
-                    # Display response in a nice format
-                    st.markdown("### Search Results:")
-                    st.markdown(response)
+                    # Use tabs to separate results and sources
+                    tabs = st.tabs(["📝 Summary", "🔍 Sources"])
                     
-                    # Show source details in expander
-                    with st.expander("View Source Details"):
-                        st.text(combined_content)
+                    # First tab: Summary
+                    with tabs[0]:
+                        st.markdown(response)
+                    
+                    # Second tab: Source details
+                    with tabs[1]:
+                        st.text_area("Raw Source Content", combined_content, height=400)
                         
             except Exception as e:
                 st.error(f"An error occurred during search: {str(e)}")
+                logging.error(f"Search error: {str(e)}", exc_info=True)  # Log the full exception
                 
         # Show search history
         if st.session_state.search_history:
-            with st.expander("📚 Search History", expanded=False):
-                for i, search in enumerate(reversed(st.session_state.search_history)):
-                    st.markdown(f"**{search['timestamp']}**: {search['query']}")
-                    if st.button(f"View Results #{i+1}"):
-                        st.markdown(search['response'])
-                    st.divider()
+            # Create a column for search history
+            history_col = st.container()
+            
+            # Create a column for displaying selected history item
+            result_col = st.container()
+            
+            # Set up session state for selected history item if not present
+            if 'selected_history_item' not in st.session_state:
+                st.session_state.selected_history_item = None
+            
+            # Display search history in first column
+            with history_col:
+                with st.expander("📚 Search History", expanded=False):
+                    for i, search in enumerate(reversed(st.session_state.search_history)):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**{search['timestamp']}**: {search['query']}")
+                        with col2:
+                            if st.button(f"View #{i+1}", key=f"view_{i}"):
+                                st.session_state.selected_history_item = i
+                        st.divider()
+            
+            # Display selected history item in second column
+            with result_col:
+                if st.session_state.selected_history_item is not None:
+                    i = st.session_state.selected_history_item
+                    search = list(reversed(st.session_state.search_history))[i]
+                    st.subheader(f"Results for: {search['query']}")
+                    
+                    # Handle older search history items that don't have response_escaped
+                    response_text = search['response']
+                    
+                    # Use text area instead of markdown to prevent rendering nested UI elements
+                    st.markdown(response_text)
+                 
+                    
+                    if st.button("Clear Results", key="clear_results"):
+                        st.session_state.selected_history_item = None
 
 if __name__ == "__main__":
     main()
