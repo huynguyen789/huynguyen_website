@@ -37,23 +37,19 @@ st.set_page_config(
 )
 
 # Model configuration
-MODEL_CONFIG = {
-    "openai/gpt-4o": {
-        "display_name": "OpenAI GPT-4o"
-    },
-    "anthropic/claude-3.7-sonnet": {
-        "display_name": "Anthropic Claude 3.7 Sonnet"
-    },
-    "google/gemini-2.0-flash-001": {
-        "display_name": "Google Gemini 2.0 Flash"
-    },
-    "google/gemini-2.5-pro-preview-03-25": {
-        "display_name": "Google Gemini 2.5 Pro"
-    },
-    "google/gemini-2.0-flash-lite-001": {
-        "display_name": "Google Gemini 2.0 Flash Lite"
-    }
-}
+MODEL_CONFIG = [
+    "openai/gpt-4.1",
+    "openai/o3",
+    "openai/o4-mini-high",
+    "anthropic/claude-3.7-sonnet",
+    "google/gemini-2.0-flash-001",
+    "google/gemini-2.5-pro-preview-03-25",
+    "google/gemini-2.0-flash-lite-001",
+    "google/gemini-2.5-flash-preview",
+    "google/gemini-2.5-flash-preview:thinking",
+    "x-ai/grok-3-beta",
+    "x-ai/grok-3-mini-beta"
+]
 
 
 def get_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
@@ -565,17 +561,13 @@ def search_page():
     # Model selection and search button in same row
     col3, col4, col5 = st.columns([2, 2, 1])
     with col3:
-        model_options = list(MODEL_CONFIG.keys())
-        model_labels = [MODEL_CONFIG[model]["display_name"] for model in model_options]
-        default_model_index = model_options.index("google/gemini-2.0-flash-lite-001")
-        model_index = st.selectbox(
+        default_model_index = MODEL_CONFIG.index("google/gemini-2.0-flash-lite-001")
+        model_choice = st.selectbox(
             "AI Model:", 
-            range(len(model_options)),
+            MODEL_CONFIG,
             index=default_model_index,
-            format_func=lambda i: model_labels[i],
             help="Different models may provide different perspectives"
         )
-        model_choice = model_options[model_index]
     with col4:
         include_youtube = st.checkbox("Include YouTube content", 
                                     value=st.session_state.include_youtube,
@@ -770,13 +762,50 @@ def search_page():
 
 
 #CHAT PAGE:
+def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
+    """
+    Input: prompt, optional model name, and optional system prompt
+    Process: Generates streaming response using OpenRouter API
+    Output: Yields response chunks and returns complete response
+    """
+    try:
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=st.secrets["OPENROUTER_API_KEY"],
+        )
+        
+        messages = [{"role": "user", "content": prompt}]
+        if system_prompt:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+        
+        stream = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            stream=True
+        )
+        
+        full_response = ""
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                full_response += content
+                yield content, full_response
+                
+        return full_response
+            
+    except Exception as e:
+        error_msg = f"Error generating response with {model_name}: {str(e)}"
+        yield error_msg, error_msg
+        return error_msg
+
+
 def chat_page():
     """
     Input: None
-    Process: Creates a basic chat interface with model selection
+    Process: Creates a basic chat interface with model selection and streaming responses
     Output: Displays chat interface and handles message exchange
     """
-
+    st.title("AI Chat 💬")
     
     # Initialize chat history in session state if not present
     if 'chat_history' not in st.session_state:
@@ -785,19 +814,14 @@ def chat_page():
             "content": "👋 Hi! I'm your AI assistant. How can I help you today?"
         }]
     
-    # Model selection
-    model_options = list(MODEL_CONFIG.keys())
-    model_labels = [MODEL_CONFIG[model]["display_name"] for model in model_options]
-    default_model_index = model_options.index("openai/gpt-4o")
+    # Model selection - use raw model names directly
+    default_model_index = MODEL_CONFIG.index("google/gemini-2.5-flash-preview")
     
     selected_model = st.selectbox(
         "Select Model:",
-        range(len(model_options)),
-        format_func=lambda i: model_labels[i],
+        MODEL_CONFIG,
         index=default_model_index
     )
-    
-    model_choice = model_options[selected_model]
     
     # Display chat history
     for message in st.session_state.chat_history:
@@ -821,37 +845,44 @@ def chat_page():
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Display assistant response with a spinner while loading
-        with st.spinner("Thinking..."):
-            with st.chat_message("assistant"):
-                try:
-                    # Format the entire conversation for the API call
-                    message_history = []
-                    for msg in st.session_state.chat_history:
-                        # Skip the first assistant greeting when sending to API
-                        if msg == st.session_state.chat_history[0] and msg["role"] == "assistant":
-                            continue
-                        message_history.append({"role": msg["role"], "content": msg["content"]})
-                    
-                    # Create the full conversation context
-                    full_prompt = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in message_history])
-                    
-                    # Get response from model
-                    response = get_response(
-                        prompt=full_prompt,
-                        model_name=model_choice,
-                        system_prompt="You are a helpful, friendly assistant. Provide concise and accurate responses to the latest user message in the conversation."
-                    )
-                    
-                    # Display the response
-                    st.markdown(response)
-                    
-                    # Add assistant response to history
-                    st.session_state.chat_history.append({"role": "assistant", "content": response})
-                except Exception as e:
-                    error_msg = f"Error: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+        # Format the entire conversation for the API call
+        message_history = []
+        for msg in st.session_state.chat_history:
+            # Skip the first assistant greeting when sending to API
+            if msg == st.session_state.chat_history[0] and msg["role"] == "assistant":
+                continue
+            message_history.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Create the full conversation context
+        full_prompt = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in message_history])
+        
+        # Display assistant response with streaming
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            
+            try:
+                # Stream the response
+                for chunk, current_response in get_streaming_response(
+                    prompt=full_prompt,
+                    model_name=selected_model,
+                    system_prompt="You are a helpful, friendly assistant. Provide concise and accurate responses to the latest user message in the conversation."
+                ):
+                    full_response = current_response
+                    # Display response with a blinking cursor
+                    message_placeholder.markdown(full_response + "▌")
+                
+                # After streaming completes, display the final message
+                message_placeholder.markdown(full_response)
+                
+                # Add assistant response to history
+                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                
+            except Exception as e:
+                error_msg = f"Error: {str(e)}"
+                message_placeholder.error(error_msg)
+                st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+
 #===============================================================
 
 
