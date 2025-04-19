@@ -762,10 +762,19 @@ def search_page():
 
 
 #CHAT PAGE:
+def get_current_time():
+    """
+    Input: None
+    Process: Gets current time using datetime
+    Output: Returns formatted current time string
+    """
+    current_time = datetime.now()
+    return current_time.strftime("%I:%M %p, %B %d, %Y")
+
 def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
     """
     Input: prompt, optional model name, and optional system prompt
-    Process: Generates streaming response using OpenRouter API
+    Process: Generates streaming response using OpenRouter API with function calling support
     Output: Yields response chunks and returns complete response
     """
     try:
@@ -773,31 +782,112 @@ def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", syste
             base_url="https://openrouter.ai/api/v1",
             api_key=st.secrets["OPENROUTER_API_KEY"],
         )
-        
+
+        # Define tools in the simpler format
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "get_current_time",
+                "description": "Get the current time.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False
+                }
+            }
+        }]
+
         messages = [{"role": "user", "content": prompt}]
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
         
-        stream = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            stream=True
-        )
+        # Check if it's an Anthropic model
+        is_anthropic = "anthropic" in model_name.lower()
         
-        full_response = ""
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_response += content
-                yield content, full_response
+        # For Anthropic models, don't include tools
+        api_params = {
+            "model": model_name,
+            "messages": messages,
+            "stream": False
+        }
+        
+        if not is_anthropic:
+            api_params["tools"] = tools
+        
+        # First call to check for function calling
+        response = client.chat.completions.create(**api_params)
+
+        # Handle function calling if present
+        if not is_anthropic and hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
+            # Add the assistant's response to messages
+            messages.append(response.choices[0].message.dict())
+            
+            # Process each tool call
+            for tool_call in response.choices[0].message.tool_calls:
+                function_name = tool_call.function.name
                 
+                # Yield information about which tool is being used
+                yield f"\n🔧 Using tool: {function_name}\n", function_name
+                
+                # Execute the tool
+                if function_name == "get_current_time":
+                    tool_result = datetime.now().strftime("%I:%M %p, %B %d, %Y")
+                    
+                    # Add tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": function_name,
+                        "content": json.dumps(tool_result)
+                    })
+
+                    # Yield the tool result for streaming display
+                    yield f"📊 Tool Result: {tool_result}\n", tool_result
+
+            # Get final response with tool result
+            stream_params = {
+                "model": model_name,
+                "messages": messages,
+                "stream": True
+            }
+            if not is_anthropic:
+                stream_params["tools"] = tools
+                
+            stream = client.chat.completions.create(**stream_params)
+
+            full_response = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    yield content, full_response
+
+        else:
+            # Regular streaming response if no function call
+            stream_params = {
+                "model": model_name,
+                "messages": messages,
+                "stream": True
+            }
+            if not is_anthropic:
+                stream_params["tools"] = tools
+                
+            stream = client.chat.completions.create(**stream_params)
+
+            full_response = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    yield content, full_response
+                    
         return full_response
             
     except Exception as e:
         error_msg = f"Error generating response with {model_name}: {str(e)}"
         yield error_msg, error_msg
         return error_msg
-
 
 def chat_page():
     """
@@ -882,6 +972,8 @@ def chat_page():
                 error_msg = f"Error: {str(e)}"
                 message_placeholder.error(error_msg)
                 st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+
+
 
 #===============================================================
 
