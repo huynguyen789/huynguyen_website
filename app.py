@@ -771,9 +771,23 @@ def get_current_time():
     current_time = datetime.now()
     return current_time.strftime("%I:%M %p, %B %d, %Y")
 
-def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
+tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "Get the current time.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False
+            }
+        }
+    }]
+
+def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None, tools: list = None):
     """
-    Input: prompt, optional model name, and optional system prompt
+    Input: prompt, optional model name, optional system prompt, and optional tools list
     Process: Generates streaming response using OpenRouter API with function calling support
     Output: Yields response chunks and returns complete response
     """
@@ -782,21 +796,6 @@ def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", syste
             base_url="https://openrouter.ai/api/v1",
             api_key=st.secrets["OPENROUTER_API_KEY"],
         )
-
-        # Define tools in the simpler format
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "get_current_time",
-                "description": "Get the current time.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False
-                }
-            }
-        }]
 
         messages = [{"role": "user", "content": prompt}]
         if system_prompt:
@@ -812,14 +811,14 @@ def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", syste
             "stream": False
         }
         
-        if not is_anthropic:
+        if not is_anthropic and tools:
             api_params["tools"] = tools
         
         # First call to check for function calling
         response = client.chat.completions.create(**api_params)
 
         # Handle function calling if present
-        if not is_anthropic and hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
+        if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
             # Add the assistant's response to messages
             messages.append(response.choices[0].message.dict())
             
@@ -851,7 +850,7 @@ def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", syste
                 "messages": messages,
                 "stream": True
             }
-            if not is_anthropic:
+            if not is_anthropic and tools:
                 stream_params["tools"] = tools
                 
             stream = client.chat.completions.create(**stream_params)
@@ -870,7 +869,7 @@ def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", syste
                 "messages": messages,
                 "stream": True
             }
-            if not is_anthropic:
+            if not is_anthropic and tools:
                 stream_params["tools"] = tools
                 
             stream = client.chat.completions.create(**stream_params)
@@ -956,7 +955,8 @@ def chat_page():
                 for chunk, current_response in get_streaming_response(
                     prompt=full_prompt,
                     model_name=selected_model,
-                    system_prompt="You are a helpful, friendly assistant. Provide concise and accurate responses to the latest user message in the conversation."
+                    system_prompt="You are a helpful, friendly assistant. Provide concise and accurate responses to the latest user message in the conversation.",
+                    tools=tools
                 ):
                     full_response = current_response
                     # Display response with a blinking cursor
