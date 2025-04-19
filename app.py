@@ -56,10 +56,6 @@ MODEL_CONFIG = {
 }
 
 
-# Initialize session state for navigation
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = 'Home'
-
 def get_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
     """
     Input: prompt, optional model name, and optional system prompt
@@ -86,6 +82,8 @@ def get_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: 
     except Exception as e:
         raise Exception(f"Error generating response with {model_name}: {str(e)}")
 
+
+#SEARCH PAGE:
 def clean_content(soup, url):
     """
     Input: BeautifulSoup object and the URL
@@ -767,6 +765,100 @@ def search_page():
                         if st.button("Clear Results", key="clear_results"):
                             st.session_state.selected_history_item = None
 
+#===============================================================
+
+
+
+#CHAT PAGE:
+def chat_page():
+    """
+    Input: None
+    Process: Creates a basic chat interface with model selection
+    Output: Displays chat interface and handles message exchange
+    """
+
+    
+    # Initialize chat history in session state if not present
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = [{
+            "role": "assistant",
+            "content": "👋 Hi! I'm your AI assistant. How can I help you today?"
+        }]
+    
+    # Model selection
+    model_options = list(MODEL_CONFIG.keys())
+    model_labels = [MODEL_CONFIG[model]["display_name"] for model in model_options]
+    default_model_index = model_options.index("openai/gpt-4o")
+    
+    selected_model = st.selectbox(
+        "Select Model:",
+        range(len(model_options)),
+        format_func=lambda i: model_labels[i],
+        index=default_model_index
+    )
+    
+    model_choice = model_options[selected_model]
+    
+    # Display chat history
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+    # Add reset button
+    if st.button("Reset Chat"):
+        st.session_state.chat_history = [{
+            "role": "assistant",
+            "content": "👋 Hi! I'm your AI assistant. How can I help you today?"
+        }]
+        st.rerun()
+    
+    # Chat input
+    if prompt := st.chat_input("Type your message here..."):
+        # Add user message to history
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Display assistant response with a spinner while loading
+        with st.spinner("Thinking..."):
+            with st.chat_message("assistant"):
+                try:
+                    # Format the entire conversation for the API call
+                    message_history = []
+                    for msg in st.session_state.chat_history:
+                        # Skip the first assistant greeting when sending to API
+                        if msg == st.session_state.chat_history[0] and msg["role"] == "assistant":
+                            continue
+                        message_history.append({"role": msg["role"], "content": msg["content"]})
+                    
+                    # Create the full conversation context
+                    full_prompt = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in message_history])
+                    
+                    # Get response from model
+                    response = get_response(
+                        prompt=full_prompt,
+                        model_name=model_choice,
+                        system_prompt="You are a helpful, friendly assistant. Provide concise and accurate responses to the latest user message in the conversation."
+                    )
+                    
+                    # Display the response
+                    st.markdown(response)
+                    
+                    # Add assistant response to history
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    error_msg = f"Error: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+#===============================================================
+
+
+# Initialize session state for navigation
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = 'Home'
+
 def home_page():
     """
     Input: None
@@ -782,7 +874,7 @@ def main():
         st.title("Navigation")
         selected_page = st.radio(
             "Go to",
-            ["Home", "Search"],
+            ["Home", "Search", "Chat"],
             key="navigation"
         )
         st.session_state.current_page = selected_page
@@ -795,6 +887,8 @@ def main():
         home_page()
     elif st.session_state.current_page == "Search":
         search_page()
+    elif st.session_state.current_page == "Chat":
+        chat_page()
 
 if __name__ == "__main__":
     main()

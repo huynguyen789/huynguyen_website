@@ -1678,6 +1678,7 @@ def get_current_time():
     """Get current time in readable format"""
     current_time = datetime.now()
     return current_time.strftime("%I:%M %p, %B %d, %Y")
+
 def generate_mermaid_diagram_sync(description):
     """
     Input: Text description of desired diagram
@@ -1735,7 +1736,6 @@ def search_web(query: str, num_results: int = 10) -> dict:
     except json.JSONDecodeError as e:
         raise Exception(f"Error decoding JSON from Serper API: {str(e)}")
 
-# Add image generation function
 def generate_image(prompt: str, size: str = "1024x1024", quality: str = "standard") -> str:
         """
         Input: Text prompt describing desired image
@@ -1758,7 +1758,6 @@ def generate_image(prompt: str, size: str = "1024x1024", quality: str = "standar
             return f"I've generated an image based on your prompt. You can see it above.\nRevised prompt: {response.data[0].revised_prompt}"
         except Exception as e:
             return f"Error generating image: {str(e)}"
-
 
 def execute_code_safely(code: str) -> dict:
     """
