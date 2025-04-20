@@ -1,4 +1,3 @@
-
 SEARCH:
 
 - Deep research
@@ -6,5 +5,5 @@ SEARCH:
 
 CHAT:
 
-- Upload files
-- Search function
+- [ ] Upload files
+- [X] Search function
