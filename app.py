@@ -1,11 +1,8 @@
+# -*- coding: utf-8 -*-
 """
 Main application file for the portfolio website.
 Handles navigation and main layout structure.
-Logic:
-- Manages page navigation through session state
-- Provides search functionality with web and YouTube sources
-- Uses synchronous functions for operations
-- Uses OpenRouter API for AI model access
+Refactored into modular functions.
 """
 
 import streamlit as st
@@ -14,20 +11,21 @@ import json
 from datetime import datetime
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
-from requests.exceptions import Timeout
+from requests.exceptions import RequestException, Timeout
 import re
 import logging
 from openai import OpenAI
-# Import newspaper library for better content extraction
 from newspaper import Article
 import html2text
+from typing import List, Dict, Tuple, Optional, Any, Generator, Union
+
+# --- Configuration ---
 
 # Configure logging
 logging.basicConfig(
     level=logging.ERROR,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 
 # Page configuration
 st.set_page_config(
@@ -51,960 +49,1159 @@ MODEL_CONFIG = [
     "x-ai/grok-3-mini-beta"
 ]
 
+# --- AI Interaction Modules ---
 
-def get_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None):
+def get_openai_client() -> OpenAI:
     """
-    Input: prompt, optional model name, and optional system prompt
-    Process: Generates response using OpenRouter API with specified model
-    Output: Generated text response
+    Input: None
+    Process: Creates and returns an OpenAI client configured for OpenRouter.
+    Output: OpenAI client instance.
     """
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=st.secrets["OPENROUTER_API_KEY"],
+    )
+
+def get_llm_response(
+    prompt: str,
+    model_name: str = "openai/gpt-4o",
+    system_prompt: Optional[str] = None,
+    client: Optional[OpenAI] = None
+) -> str:
+    """
+    Input: prompt, optional model name, optional system prompt, optional OpenAI client.
+    Process: Generates a non-streaming response using the specified model via OpenRouter.
+    Output: Generated text response string.
+    """
+    if client is None:
+        client = get_openai_client()
+
     try:
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=st.secrets["OPENROUTER_API_KEY"],
-        )
-        
         messages = [{"role": "user", "content": prompt}]
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
-        
+
         completion = client.chat.completions.create(
             model=model_name,
             messages=messages
         )
-        
         return completion.choices[0].message.content
-            
+
     except Exception as e:
+        logging.error(f"Error generating response with {model_name}: {str(e)}", exc_info=True)
         raise Exception(f"Error generating response with {model_name}: {str(e)}")
 
 
-#SEARCH PAGE:
-def clean_content(soup, url):
+def get_streaming_llm_response(
+    messages: List[Dict[str, str]],
+    model_name: str = "openai/gpt-4o",
+    tools: Optional[List[Dict]] = None,
+    client: Optional[OpenAI] = None
+) -> Generator[Tuple[str, str], None, None]:
     """
-    Input: BeautifulSoup object and the URL
-    Process: Uses multiple extraction methods to get the best content, preserving code blocks
-    Output: Cleaned text content
+    Input: List of messages, optional model name, optional tools list, optional OpenAI client.
+    Process: Generates a streaming response using OpenRouter API, handling potential function calls.
+    Output: Yields tuples of (chunk, full_response_so_far). Returns the final full response string upon completion or error.
     """
-    content = ""
-    html_content = str(soup)
-    
-    # Method 1: Try newspaper3k extraction first (good for articles)
-    try:
-        article = Article(url)
-        # Set html manually since we already have it
-        article.set_html(html_content)
-        article.parse()
-        if article.text and len(article.text) > 300:  # Only use if we got substantial content
-            content = article.text
-    except Exception as e:
-        logging.error(f"Newspaper extraction error: {str(e)}")
-    
-    # Method 2: Use html2text directly on the main content area
-    if not content or len(content) < 300:
-        try:
-            # Remove unnecessary elements first
-            for element in soup(['script', 'style', 'nav', 'footer', 'header']):
-                element.decompose()
-            
-            # Try to find the main content area
-            main_content = (
-                soup.find('div', id='main-outlet') or  
-                soup.find('main') or
-                soup.find('article') or
-                soup.find('div', class_='content') or
-                soup.find('div', id='content') or
-                soup.body  # Fallback to entire body if no specific content area found
-            )
-            
-            if main_content:
-                # Create an HTML2Text instance for converting HTML to markdown
-                h = html2text.HTML2Text()
-                h.ignore_links = False
-                h.ignore_images = True 
-                h.ignore_tables = False
-                h.preserve_newlines = True
-                # This is crucial for code blocks - prevents wrapping
-                h.body_width = 0
-                
-                # Convert HTML to markdown-like text (preserves code blocks)
-                content = h.handle(str(main_content))
-        except Exception as e:
-            logging.error(f"HTML2Text extraction error: {str(e)}")
-    
-    # Method 3: Fall back to a simpler BeautifulSoup extraction if others failed
-    if not content or len(content) < 300:
-        try:
-            # Find the main content again (since we already processed soup)
-            main_content = (
-                soup.find('div', id='main-outlet') or  
-                soup.find('main') or
-                soup.find('article') or
-                soup.find('div', class_='content') or
-                soup.find('div', id='content') or
-                soup.body
-            )
-            
-            if main_content:
-                # Extract code blocks first
-                code_blocks = []
-                for code_elem in main_content.find_all(['pre', 'code']):
-                    code_text = code_elem.get_text(strip=False)  # Preserve whitespace in code
-                    if code_text:
-                        code_blocks.append(f"```\n{code_text}\n```")
-                
-                # Extract text content
-                text_elements = []
-                for elem in main_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'blockquote']):
-                    text = elem.get_text(strip=True)
-                    if text:
-                        text_elements.append(text)
-                
-                if text_elements:
-                    content = '\n\n'.join(text_elements)
-                
-                # Add extracted code blocks
-                if code_blocks:
-                    content += '\n\n' + '\n\n'.join(code_blocks)
-        except Exception as e:
-            logging.error(f"BeautifulSoup extraction error: {str(e)}")
-    
-    return content if content else "No main content found."
+    if client is None:
+        client = get_openai_client()
 
-def search_and_summarize(query, model_choice, search_type, include_youtube=True, progress_callback=None):
+    try:
+        # Check if it's an Anthropic model (which might not support tools well or require different handling)
+        is_anthropic = "anthropic" in model_name.lower()
+
+        # --- Initial Call (Check for Tool Use) ---
+        api_params = {
+            "model": model_name,
+            "messages": messages,
+            "stream": False # First call is non-streaming to check for tool_calls
+        }
+        if not is_anthropic and tools:
+            api_params["tools"] = tools
+            api_params["tool_choice"] = "auto" # Explicitly allow model to choose
+
+        response = client.chat.completions.create(**api_params)
+        response_message = response.choices[0].message
+
+        tool_calls = getattr(response_message, 'tool_calls', None)
+
+        # --- Handle Tool Calls ---
+        if tool_calls:
+            # Append the assistant's response (requesting tool use) to messages
+            messages.append(response_message.dict(exclude_unset=True)) # Use dict representation
+
+            available_functions = {
+                "get_current_time": get_current_time,
+            }
+
+            for tool_call in tool_calls:
+                function_name = tool_call.function.name
+                function_to_call = available_functions.get(function_name)
+
+                yield f"\n🔧 Using tool: {function_name}\n", f"tool_call:{function_name}" # Signal tool use
+
+                if function_to_call:
+                    # Note: Currently no function arguments are defined/expected
+                    # function_args = json.loads(tool_call.function.arguments) # If args were needed
+                    function_response = function_to_call()
+                    tool_result_str = json.dumps(function_response) # Ensure result is JSON string
+
+                    messages.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": tool_result_str,
+                    })
+                    yield f"📊 Tool Result ({function_name}): {function_response}\n", f"tool_result:{tool_result_str}" # Signal tool result
+                else:
+                     # Handle case where function is not found (optional)
+                    yield f"⚠️ Tool '{function_name}' not found.\n", f"tool_error:not_found"
+                    messages.append({ # Still need to provide a response for the tool call
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": json.dumps({"error": f"Function {function_name} not found"}),
+                    })
+
+
+            # --- Second Call (With Tool Results) ---
+            stream_params = {
+                "model": model_name,
+                "messages": messages,
+                "stream": True
+            }
+            # Don't send tools again if the model already decided to use them
+            # if not is_anthropic and tools:
+            #     stream_params["tools"] = tools
+
+            stream = client.chat.completions.create(**stream_params)
+            full_response = ""
+            for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    full_response += content
+                    yield content, full_response
+            # return full_response # Generator implicitly returns None
+
+        # --- No Tool Calls ---
+        else:
+            # Regular streaming response
+            stream_params = {
+                "model": model_name,
+                "messages": messages,
+                "stream": True
+            }
+            if not is_anthropic and tools: # Still offer tools if none were chosen initially
+                stream_params["tools"] = tools
+
+            stream = client.chat.completions.create(**stream_params)
+            full_response = ""
+            for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    full_response += content
+                    yield content, full_response
+            # return full_response # Generator implicitly returns None
+
+    except Exception as e:
+        error_msg = f"Error generating streaming response with {model_name}: {str(e)}"
+        logging.error(error_msg, exc_info=True)
+        yield error_msg, error_msg # Yield error message
+        # return error_msg # Generator implicitly returns None
+
+
+# --- Content Fetching & Processing Modules ---
+
+def fetch_serper_results(query: str, api_key: str) -> Dict[str, Any]:
     """
-    Input: Search query, model choice, search type, YouTube inclusion flag, and optional progress callback
-    Process: Searches web and YouTube for content and summarizes results, continuing until target number of sources is reached
-    Output: Number of sources used, blocked websites, combined content, AI summary, raw Serper API response, and word count
+    Input: Search query string, Serper API key.
+    Process: Performs a search using the Serper Google Search API.
+    Output: Dictionary containing the raw search results from Serper API.
     """
-    if progress_callback:
-        progress_callback("Searching for web content...", 0.1)
-    
-    # Serper API call
     url = "https://google.serper.dev/search"
     payload = json.dumps({"q": query})
     headers = {
-        'X-API-KEY': st.secrets["SERPER_API_KEY"],
+        'X-API-KEY': api_key,
         'Content-Type': 'application/json'
     }
-    
     try:
-        response = requests.post(url, headers=headers, data=payload)
-        response.raise_for_status()
-        search_results = response.json()
+        response = requests.post(url, headers=headers, data=payload, timeout=10)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        results = response.json()
+        if 'organic' not in results:
+            logging.warning(f"Serper results missing 'organic' key for query: {query}")
+            # Return a structure consistent with success but empty
+            return {"organic": [], "searchParameters": {"q": query}, "type": "empty_result"}
+        return results
+    except Timeout:
+        logging.error(f"Serper API request timed out for query: {query}")
+        raise Exception("Search API request timed out.")
+    except RequestException as e:
+        logging.error(f"Serper API request error for query '{query}': {e}")
+        raise Exception(f"Search API error: {e}")
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to decode Serper API response for query '{query}': {e}")
+        raise Exception("Failed to parse search results.")
+
+
+def fetch_youtube_transcript(video_url: str) -> Optional[str]:
+    """
+    Input: YouTube video URL.
+    Process: Extracts video ID and fetches the transcript using youtube_transcript_api.
+    Output: Transcript text string, or None if transcript is unavailable or an error occurs.
+    """
+    try:
+        video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', video_url)
+        if not video_id_match:
+            logging.warning(f"Could not extract video ID from URL: {video_url}")
+            return None
+
+        video_id = video_id_match.group(1)
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript_text = ' '.join([entry['text'] for entry in transcript_list])
+        return transcript_text
     except Exception as e:
-        raise Exception(f"Search API error: {str(e)}")
+        # Handles cases like transcripts disabled, video unavailable, etc.
+        logging.warning(f"Could not fetch transcript for {video_url}: {e}")
+        return None
 
-    if 'organic' not in search_results:
-        raise Exception("Invalid search results format")
 
-    if progress_callback:
-        progress_callback("Processing search results...", 0.2)
+def clean_web_content(html_content: str, url: str) -> str:
+    """
+    Input: Raw HTML content string, the source URL.
+    Process: Uses newspaper3k and html2text to extract and clean the main text content from HTML.
+              Prioritizes newspaper3k, falls back to html2text, then basic BeautifulSoup.
+    Output: Cleaned text content string. Returns "No main content found." if extraction fails.
+    """
+    content = ""
 
-    # Lists to store content from different sources
+    # Method 1: newspaper3k
+    try:
+        article = Article(url)
+        article.set_html(html_content)
+        article.parse()
+        if article.text and len(article.text.strip()) > 200: # Check for meaningful content length
+            content = article.text.strip()
+            logging.info(f"Extracted content using newspaper3k for {url}")
+    except Exception as e:
+        logging.warning(f"Newspaper3k extraction failed for {url}: {e}")
+
+    # Method 2: html2text (if newspaper failed or produced short content)
+    if not content:
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            # Remove common noise elements
+            for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'form', 'button', 'input']):
+                element.decompose()
+
+            # Try finding common main content containers
+            main_content_area = (
+                soup.find('main') or
+                soup.find('article') or
+                soup.find('div', id=re.compile(r'main|content', re.I)) or
+                soup.find('div', class_=re.compile(r'post|entry|content|article', re.I)) or
+                soup.body # Fallback
+            )
+
+            if main_content_area:
+                h = html2text.HTML2Text()
+                h.ignore_links = True # Keep links potentially useful later, maybe make configurable
+                h.ignore_images = True
+                h.ignore_tables = False
+                h.body_width = 0 # Preserve formatting, especially for code
+                h.unicode_snob = True # Try to get cleaner unicode chars
+                h.escape_snob = True # Escape special markdown chars
+
+                text_content = h.handle(str(main_content_area))
+                # Further clean-up: remove excessive newlines
+                text_content = re.sub(r'\n\s*\n', '\n\n', text_content).strip()
+                if len(text_content) > 100: # Basic check for actual content
+                    content = text_content
+                    logging.info(f"Extracted content using html2text for {url}")
+                else:
+                     logging.warning(f"html2text extracted very short content for {url}")
+
+        except Exception as e:
+            logging.warning(f"html2text extraction failed for {url}: {e}")
+
+    # Method 3: Basic BeautifulSoup text extraction (last resort)
+    if not content:
+        try:
+            # Reuse soup if created, else parse again
+            if 'soup' not in locals():
+                 soup = BeautifulSoup(html_content, 'html.parser')
+                 for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'form', 'button', 'input']):
+                     element.decompose()
+
+            # Get text from paragraph and heading tags
+            text_elements = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'])
+            extracted_text = '\n'.join(elem.get_text(strip=True) for elem in text_elements if elem.get_text(strip=True))
+
+            if len(extracted_text) > 100:
+                content = extracted_text
+                logging.info(f"Extracted content using basic BeautifulSoup for {url}")
+            else:
+                logging.warning(f"Basic BeautifulSoup extraction yielded very short content for {url}")
+
+        except Exception as e:
+            logging.warning(f"Basic BeautifulSoup extraction failed for {url}: {e}")
+
+
+    return content if content else "No main content found."
+
+
+def fetch_and_clean_website(url: str, timeout: int = 10) -> Optional[str]:
+    """
+    Input: Website URL, request timeout duration.
+    Process: Fetches the website's HTML content and cleans it using clean_web_content.
+    Output: Cleaned text content string, or None if fetching/cleaning fails or content is empty.
+    """
+    try:
+        headers = { # Add a user-agent to mimic a browser
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, timeout=timeout, headers=headers)
+        response.raise_for_status() # Check for HTTP errors
+
+        if response.status_code == 200 and response.content:
+            # Decode content carefully
+            content_type = response.headers.get('content-type', '').lower()
+            encoding = response.encoding if response.encoding else response.apparent_encoding
+            try:
+                html_content = response.content.decode(encoding if encoding else 'utf-8', errors='replace')
+            except (UnicodeDecodeError, LookupError):
+                 html_content = response.text # Fallback to requests' auto-decoded text
+
+            cleaned_content = clean_web_content(html_content, url)
+            if cleaned_content and cleaned_content != "No main content found.":
+                return cleaned_content
+            else:
+                logging.warning(f"Cleaning returned no content for {url}")
+                return None
+        else:
+            logging.warning(f"Received status code {response.status_code} for {url}")
+            return None
+
+    except Timeout:
+        logging.warning(f"Request timed out for {url}")
+        return None
+    except RequestException as e:
+        logging.warning(f"Failed to fetch {url}: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Unexpected error fetching/cleaning {url}: {e}", exc_info=True)
+        return None
+
+
+# --- Search Orchestration Module ---
+
+def gather_content_from_results(
+    organic_results: List[Dict[str, Any]],
+    target_sources: int,
+    include_youtube: bool,
+    max_attempts: int,
+    progress_callback: Optional[callable] = None
+) -> Tuple[List[Dict], List[Dict], List[str], List[str], Dict]:
+    """
+    Input: List of organic search results from Serper, target number of sources,
+           YouTube inclusion flag, max processing attempts, optional progress callback.
+    Process: Iterates through search results, fetches and cleans website content,
+             fetches YouTube transcripts, until target source count or max attempts is reached.
+    Output: Tuple containing:
+            - website_contents (List[Dict]): Successfully processed websites.
+            - youtube_contents (List[Dict]): Successfully processed YouTube videos.
+            - blocked_urls (List[str]): URLs that failed or were blocked.
+            - failed_youtube_urls (List[str]): YouTube URLs that failed.
+            - access_stats (Dict): Statistics about the fetching process.
+    """
     website_contents = []
     youtube_contents = []
-    
-    # Counters
+    blocked_urls = []
+    failed_youtube_urls = []
+
     successful_website_count = 0
     successful_youtube_count = 0
-    blocked_websites_count = 0
+    blocked_website_count = 0
     failed_youtube_count = 0
-    
-    # Lists to store blocked/failed URLs
-    blocked_websites = []
-    failed_youtube = []
-    
-    # Define target number of successful sources (websites + YouTube videos)
-    target_sources = 5 if search_type == "fast" else 10
-    
-    # Safety limit to prevent infinite processing if most sites are blocked
-    max_attempts = 30
-    total_attempted = 0
-    processed_urls = set()  # Track URLs we've already processed to avoid duplicates
 
-    # Process search results until we reach target number of sources or max attempts
-    for rank, result in enumerate(search_results['organic'], 1):
-        # Skip if we've already processed this URL
-        if result['link'] in processed_urls:
-            continue
-            
-        processed_urls.add(result['link'])
-        total_attempted += 1
-        
-        # Safety check to avoid infinite loops
+    processed_urls = set()
+    total_attempted = 0
+
+    for result in organic_results:
         if total_attempted >= max_attempts:
+            logging.warning("Reached max processing attempts.")
             break
-            
-        # Calculate progress percentage (adjust to account for more possible attempts)
-        progress = 0.2 + (0.6 * min(total_attempted, target_sources) / target_sources)
-        
+
+        total_successful = successful_website_count + successful_youtube_count
+        if total_successful >= target_sources:
+            break # Target reached
+
+        url = result.get('link')
+        title = result.get('title', 'Untitled')
+
+        if not url or url in processed_urls:
+            continue # Skip if no URL or already processed
+
+        processed_urls.add(url)
+        total_attempted += 1
+
+        # Calculate progress
+        progress = 0.2 + (0.6 * min(total_successful, target_sources) / target_sources) # Progress based on successful finds
+
+        is_youtube = 'youtube.com/watch?v=' in url or 'youtu.be/' in url
+
         try:
-            if 'youtube.com' in result['link'] and include_youtube:
+            if is_youtube and include_youtube:
                 if progress_callback:
-                    progress_callback(f"Processing YouTube video {successful_youtube_count + 1} (attempt {total_attempted})", progress)
-                
-                video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', result['link'])
-                if video_id_match:
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id_match.group(1))
-                    transcript_text = ' '.join([entry['text'] for entry in transcript])
+                    progress_callback(f"Processing YouTube video {successful_youtube_count + 1}/{target_sources} (Attempt {total_attempted})...", progress)
+
+                transcript = fetch_youtube_transcript(url)
+                if transcript:
                     youtube_contents.append({
-                        'title': result.get('title', 'YouTube Video'),
-                        'link': result['link'],
-                        'content': transcript_text
+                        'title': title,
+                        'link': url,
+                        'content': transcript
                     })
                     successful_youtube_count += 1
                 else:
-                    failed_youtube.append(result['link'])
+                    failed_youtube_urls.append(url)
                     failed_youtube_count += 1
-            else:
+
+            elif not is_youtube:
                 if progress_callback:
-                    progress_callback(f"Processing website {successful_website_count + 1} (attempt {total_attempted})", progress)
-                
-                try:
-                    page_response = requests.get(result['link'], timeout=5)
-                    page_response.raise_for_status()  # Check for HTTP errors
-                    
-                    if page_response.status_code == 200:
-                        soup = BeautifulSoup(page_response.content, 'html.parser')
-                        content = clean_content(soup, result['link'])
-                        if content and content != "No main content found.":
-                            website_contents.append({
-                                'title': result.get('title', 'Website'),
-                                'link': result['link'],
-                                'content': content
-                            })
-                            successful_website_count += 1
-                        else:
-                            blocked_websites.append(result['link'])
-                            blocked_websites_count += 1
-                    else:
-                        blocked_websites.append(result['link'])
-                        blocked_websites_count += 1
-                except requests.exceptions.RequestException as e:
-                    # Handle various request exceptions (timeout, connection error, etc.)
-                    blocked_websites.append(result['link'])
-                    blocked_websites_count += 1
-                
+                    progress_callback(f"Processing website {successful_website_count + 1}/{target_sources} (Attempt {total_attempted})...", progress)
+
+                content = fetch_and_clean_website(url)
+                if content:
+                    website_contents.append({
+                        'title': title,
+                        'link': url,
+                        'content': content
+                    })
+                    successful_website_count += 1
+                else:
+                    blocked_urls.append(url)
+                    blocked_website_count += 1
+            # else: # Is YouTube but include_youtube is False
+            #     pass # Just skip
+
         except Exception as e:
-            if 'youtube.com' in result.get('link', ''):
-                failed_youtube.append(result['link'])
+            # Catch unexpected errors during processing a specific result
+            logging.error(f"Error processing result {url}: {e}", exc_info=True)
+            if is_youtube:
+                failed_youtube_urls.append(url)
                 failed_youtube_count += 1
             else:
-                blocked_websites.append(result['link'])
-                blocked_websites_count += 1
-            continue
-            
-        # Check if we've reached our target
-        total_successful = successful_website_count + successful_youtube_count
-        if total_successful >= target_sources:
-            break
-            
-    # If we didn't reach our target and there might be more results, consider making another search with a modified query
-    if (successful_website_count + successful_youtube_count < target_sources) and (total_attempted < max_attempts):
-        if progress_callback:
-            progress_callback(f"Not enough sources found. Attempting to find more results...", 0.7)
-        
-        # You could implement pagination or modified queries here if needed
-        # This is a simple example - you might want to add more sophisticated handling
-        try:
-            # Add a refinement to the query to get different results
-            refined_query = f"{query} more information"
-            payload = json.dumps({"q": refined_query})
-            response = requests.post(url, headers=headers, data=payload)
-            additional_results = response.json()
-            
-            if 'organic' in additional_results:
-                # Process additional results (similar logic as above)
-                for rank, result in enumerate(additional_results['organic'], 1):
-                    # Skip if we've already processed this URL
-                    if result['link'] in processed_urls:
-                        continue
-                        
-                    processed_urls.add(result['link'])
-                    total_attempted += 1
-                    
-                    # Safety check
-                    if total_attempted >= max_attempts:
-                        break
-                        
-                    # Calculate progress
-                    progress = 0.2 + (0.6 * min(total_attempted, target_sources) / target_sources)
-                    
-                    # Same processing logic as above
-                    try:
-                        if 'youtube.com' in result['link'] and include_youtube:
-                            if progress_callback:
-                                progress_callback(f"Processing additional YouTube video {successful_youtube_count + 1} (attempt {total_attempted})", progress)
-                            
-                            video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', result['link'])
-                            if video_id_match:
-                                transcript = YouTubeTranscriptApi.get_transcript(video_id_match.group(1))
-                                transcript_text = ' '.join([entry['text'] for entry in transcript])
-                                youtube_contents.append({
-                                    'title': result.get('title', 'YouTube Video'),
-                                    'link': result['link'],
-                                    'content': transcript_text
-                                })
-                                successful_youtube_count += 1
-                            else:
-                                failed_youtube.append(result['link'])
-                                failed_youtube_count += 1
-                        else:
-                            if progress_callback:
-                                progress_callback(f"Processing additional website {successful_website_count + 1} (attempt {total_attempted})", progress)
-                            
-                            try:
-                                page_response = requests.get(result['link'], timeout=5)
-                                page_response.raise_for_status()
-                                
-                                if page_response.status_code == 200:
-                                    soup = BeautifulSoup(page_response.content, 'html.parser')
-                                    content = clean_content(soup, result['link'])
-                                    if content and content != "No main content found.":
-                                        website_contents.append({
-                                            'title': result.get('title', 'Website'),
-                                            'link': result['link'],
-                                            'content': content
-                                        })
-                                        successful_website_count += 1
-                                    else:
-                                        blocked_websites.append(result['link'])
-                                        blocked_websites_count += 1
-                                else:
-                                    blocked_websites.append(result['link'])
-                                    blocked_websites_count += 1
-                            except requests.exceptions.RequestException as e:
-                                blocked_websites.append(result['link'])
-                                blocked_websites_count += 1
-                            
-                    except Exception as e:
-                        if 'youtube.com' in result.get('link', ''):
-                            failed_youtube.append(result['link'])
-                            failed_youtube_count += 1
-                        else:
-                            blocked_websites.append(result['link'])
-                            blocked_websites_count += 1
-                        continue
-                        
-                    # Check if we've reached our target
-                    total_successful = successful_website_count + successful_youtube_count
-                    if total_successful >= target_sources:
-                        break
-        except Exception as e:
-            # If the additional search fails, just continue with what we have
-            logging.error(f"Additional search error: {str(e)}")
+                blocked_urls.append(url)
+                blocked_website_count += 1
+            continue # Move to the next result
 
-    if progress_callback:
-        progress_callback("Generating summary...", 0.8)
-        
-    # Format the content for the prompt
+    access_stats = {
+        "target_sources": target_sources,
+        "total_attempted": total_attempted,
+        "successful_websites": successful_website_count,
+        "successful_youtube": successful_youtube_count,
+        "blocked_websites": blocked_website_count, # Renamed for clarity
+        "failed_youtube": failed_youtube_count,
+        "blocked_urls": blocked_urls,
+        "failed_youtube_urls": failed_youtube_urls
+    }
+
+    return website_contents, youtube_contents, blocked_urls, failed_youtube_urls, access_stats
+
+
+def format_content_for_llm(
+    website_contents: List[Dict],
+    youtube_contents: List[Dict]
+) -> Tuple[str, str, Dict[str, str]]:
+    """
+    Input: Lists of processed website and YouTube content dictionaries.
+    Process: Formats the content into a single string for the LLM prompt,
+             creates a combined string for display, and generates a source mapping.
+    Output: Tuple containing:
+            - formatted_content (str): Content formatted with XML-like tags for the LLM.
+            - combined_content_display (str): Content formatted for user display.
+            - source_mapping (Dict[str, str]): Maps source IDs (e.g., "website_1") to URLs.
+    """
     formatted_content = ""
-    
-    # Create a source mapping for easier reference
+    combined_content_display_parts = []
     source_mapping = {}
-    
+
     # Add website content
     for i, web_content in enumerate(website_contents, 1):
         source_id = f"website_{i}"
         source_mapping[source_id] = web_content['link']
         formatted_content += f"<{source_id}>\nTitle: {web_content['title']}\nURL: {web_content['link']}\nSource ID: {source_id}\n\n{web_content['content']}\n</{source_id}>\n\n"
-    
+        display_entry = f"--- Source: Website {i} ---\nTitle: {web_content['title']}\nURL: {web_content['link']}\nSource ID: {source_id}\n\n{web_content['content']}"
+        combined_content_display_parts.append(display_entry)
+
     # Add YouTube content
     for i, yt_content in enumerate(youtube_contents, 1):
         source_id = f"youtube_video_{i}"
         source_mapping[source_id] = yt_content['link']
         formatted_content += f"<{source_id}>\nTitle: {yt_content['title']}\nURL: {yt_content['link']}\nSource ID: {source_id}\n\n{yt_content['content']}\n</{source_id}>\n\n"
-    
-    # Create a combined content for display
-    combined_content = []
-    for i, web_content in enumerate(website_contents, 1):
-        source_id = f"website_{i}"
-        formatted_entry = f"[Website {i}] {web_content['title']}\nURL: {web_content['link']}\n\nSource ID: {source_id}\n\n{web_content['content']}"
-        combined_content.append(formatted_entry)
-    
-    for i, yt_content in enumerate(youtube_contents, 1):
-        source_id = f"youtube_video_{i}"
-        formatted_entry = f"[YouTube {i}] {yt_content['title']}\nURL: {yt_content['link']}\n\nSource ID: {source_id}\n\n{yt_content['content']}"
-        combined_content.append(formatted_entry)
-    
-    # Get today's date
+        display_entry = f"--- Source: YouTube {i} ---\nTitle: {yt_content['title']}\nURL: {yt_content['link']}\nSource ID: {source_id}\n\n{yt_content['content']}"
+        combined_content_display_parts.append(display_entry)
+
+    combined_content_display = "\n\n".join(combined_content_display_parts)
+    return formatted_content.strip(), combined_content_display, source_mapping
+
+
+def generate_search_summary(
+        query: str,
+        formatted_content: str,
+        source_mapping: Dict[str, str],
+        model_choice: str,
+        client: Optional[OpenAI] = None
+    ) -> str:
+    """
+    Input: User query, LLM-formatted content, source mapping, chosen model name, optional OpenAI client.
+    Process: Creates the final prompt and calls the LLM to generate a summary.
+    Output: AI-generated summary string.
+    """
     today_date = datetime.now().strftime("%Y-%m-%d")
-    
-    # Create source reference section for clear citations
     source_references = "\n".join([f"{source_id}: {url}" for source_id, url in source_mapping.items()])
-    
-    # Create the prompt with the template
-    system_prompt = """<role>You are a world class search engine. 
-Based on the web content and youtube transcripts, create a world-class summary to answer the user query.</role>
+
+    system_prompt = """<role>You are a world class search engine and summarizer.
+Based on the provided web content and YouTube transcripts, create a comprehensive and accurate summary to answer the user's query.</role>
 """
 
-    prompt_template = f"""<instructions>The content is organized with tags to indicate different sources:
-- <website_1>, <website_2>, etc.: Content from different websites
-- <youtube_video_1>, <youtube_video_2>, etc.: Transcripts from different YouTube videos
+    prompt_template = f"""<instructions>
+The content below is organized with tags indicating the source:
+- <website_1>, <website_2>, etc.: Content from different websites.
+- <youtube_video_1>, <youtube_video_2>, etc.: Transcripts from different YouTube videos.
 
-Source Reference Map:
+Source Reference Map (Use these URLs for citations):
 {source_references}
 
-Today date: {today_date}
+Today's Date: {today_date}
 
 User Query: {query}
 
-Carefully think based on the user query and content to generate a world-class answer.
-Output format: First generate a short answer, then create a detail answer. With clear title for both.
-Be concise but include all of the important details. 
-Give examples if possible.  
-Focus on high quality and accuracy: filter, compare, select from provided content to get the best answer! 
-If you dont have enough info, state so and give users links to look by themself. Do not make up info!  
+Task:
+Carefully analyze the user query and the provided content to generate a world-class answer.
 
-IMPORTANT - For citations: 
-1. When citing a source, use proper markdown links: [text](URL)
-2. Replace references like "website_1" or "youtube_video_1" with actual clickable links
-3. Example: Instead of writing "According to [website_1]..." write "According to [this source](https://example.com)..."
-4. Use the source URLs in the references section above for your links
-5. NEVER use bracketed references like [website_1] in your final output
+Output Format:
+1.  **Short Answer:** A concise summary addressing the core of the query.
+2.  **Detailed Answer:** A more comprehensive explanation, elaborating on key points.
+    - Use clear titles (e.g., `### Short Answer`, `### Detailed Answer`).
+    - Structure the detailed answer logically using headings and bullet points where appropriate.
+    - Include examples if relevant and supported by the content.
 
-Output nicely in Markdown with clear titles and contents.
+Content Guidelines:
+- Focus on high quality and accuracy. Synthesize information from the provided sources.
+- Filter out irrelevant information. Compare sources if they conflict, and note discrepancies if significant.
+- If the provided content is insufficient to answer the query fully, state that clearly. Do *not* invent information.
+- Be objective and neutral in tone.
 
-*** Important: For coding search:
-- If you found many different answers, code syntax, or approaches, alert & show them all to user. User can test out to see which one works(note to them that too)
-- Pay more attention to date on the content for the newest code version and show the user that info too.
-- Example: If you found 2 results: 
-        Old and wrong way:
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=[
-                {{"role": "user", "content": prompt}}
-            ]
-        )
+**CRITICAL Citation Requirements:**
+1.  Cite sources using Markdown links: `[descriptive text](URL)`.
+2.  Use the actual URLs from the 'Source Reference Map' above for the links.
+3.  Integrate citations naturally within the text where information is used.
+4.  **NEVER** use the internal source IDs like `[website_1]` or `[youtube_video_1]` in your final output. Cite with the URL.
+    *   *Example Correct:* "According to [this analysis](https://example.com/analysis)..."
+    *   *Example Incorrect:* "According to [website_1]..."
 
-        New and correct way:
-        from openai import OpenAI
-        client = OpenAI()
+**Special Instructions for Coding-Related Queries:**
+- If multiple code snippets, syntaxes, or approaches are found for the same task, present them clearly.
+- Highlight potential differences (e.g., old vs. new syntax, different libraries).
+- Note if source dates suggest one approach is more current. Advise the user to test the code.
+- Format code blocks correctly using Markdown triple backticks (```).
 
-        completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {{"role": "system", "content": "You are a helpful assistant."}},
-            {{"role": "user", "content": "Hello!"}}
-        ]
-        )
-
-        print(completion.choices[0].message.content)
-
-        Alert & show the user both examples so they can select from!
-
-If you done a great job, you will get a 100k bonus this year. If not a cat will die.
+*Self-Correction/Improvement:* Review your generated response before finalizing. Ensure all instructions, especially citation rules, are followed meticulously. A high-quality, well-cited answer is paramount.
 </instructions>
 
 <content>
 {formatted_content}
 </content>
 """
-
-    # Use the model to generate a summary
     try:
-        summary = get_response(
-            prompt_template,
+        summary = get_llm_response(
+            prompt=prompt_template,
             model_name=model_choice,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            client=client # Pass client if provided
         )
+        return summary
     except Exception as e:
+        logging.error(f"Summary generation failed: {e}", exc_info=True)
         raise Exception(f"Summary generation error: {str(e)}")
 
-    if progress_callback:
-        progress_callback("Complete!", 1.0)
 
-    # Create a structured result object
-    access_stats = {
-        "target_sources": target_sources,
-        "total_attempted": total_attempted,
-        "successful_websites": successful_website_count,
-        "successful_youtube": successful_youtube_count,
-        "blocked_websites": blocked_websites_count,
-        "failed_youtube": failed_youtube_count,
-        "blocked_urls": blocked_websites,
-        "failed_youtube_urls": failed_youtube
-    }
-
-    # Include both original and any additional search results
-    combined_search_results = search_results
-    if 'additional_results' in locals():
-        combined_search_results['additional_results'] = additional_results
-
-    return successful_website_count, successful_youtube_count, blocked_websites_count, '\n\n'.join(combined_content), summary, len('\n\n'.join(combined_content).split()), combined_search_results, access_stats, source_mapping
-
-def search_page():
+def search_and_summarize_orchestrator(
+    query: str,
+    model_choice: str,
+    search_depth: str, # "fast" or "deep"
+    include_youtube: bool,
+    progress_callback: Optional[callable] = None
+) -> Dict[str, Any]:
     """
-    Input: None
-    Process: Handles the search page UI and functionality
-    Output: Renders the search page interface
+    Input: Search query, model choice, search depth, YouTube inclusion flag, optional progress callback.
+    Process: Orchestrates the entire search and summarization process:
+             1. Fetches initial search results via Serper.
+             2. Gathers content from results.
+             3. (Optional) Fetches additional results if needed.
+             4. Formats content for LLM.
+             5. Generates summary using LLM.
+             6. Compiles final results object.
+    Output: Dictionary containing the summary, source details, stats, and raw results.
     """
-    st.title("AI-Powered Search Assistant 🔍")
-    st.write("Get comprehensive answers from multiple web sources and YouTube videos.")
-    
-    # Initialize include_youtube in session state if not present
-    if 'include_youtube' not in st.session_state:
-        st.session_state.include_youtube = True
-    
-    # Search interface
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        query = st.text_input("🔍 Enter your search query:", 
-                            placeholder="How's the weather in San Francisco?",
-                            help="Be specific for better results")
-    with col2:
-        search_type = st.selectbox("Search Depth:", 
-                                 ["Quick (5 sources)", "Deep (10 sources)"],
-                                 help="Deep search takes longer but provides more comprehensive results")
-    
-    # Model selection and search button in same row
-    col3, col4, col5 = st.columns([2, 2, 1])
-    with col3:
-        default_model_index = MODEL_CONFIG.index("google/gemini-2.0-flash-lite-001")
-        model_choice = st.selectbox(
-            "AI Model:", 
-            MODEL_CONFIG,
-            index=default_model_index,
-            help="Different models may provide different perspectives"
-        )
-    with col4:
-        include_youtube = st.checkbox("Include YouTube content", 
-                                    value=st.session_state.include_youtube,
-                                    help="Include transcripts from relevant YouTube videos",
-                                    key="include_youtube_checkbox")
-        # Update session state
-        st.session_state.include_youtube = include_youtube
-    with col5:
-        search_button = st.button("🔎 Search", use_container_width=True)
-    
-    # Initialize session state for search history
-    if 'search_history' not in st.session_state:
-        st.session_state.search_history = []
-    
-    if search_button and query:
-        try:
-            # Create placeholder containers for results
-            results_container = st.container()
-            
-            # Show searching status in a temporary status indicator
-            with st.status("🔍 Searching...") as status:
-                # Search progress tracking
-                progress_text = st.empty()
-                progress_bar = st.progress(0)
-                
-                def update_progress(message, progress):
-                    progress_text.text(message)
-                    progress_bar.progress(progress)
-                    status.update(label=message)
-                
-                # Perform search
-                search_depth = "deep" if search_type == "Deep (10 sources)" else "fast"
-                websites_used, youtube_videos_used, blocked_count, combined_content, response, word_count, serper_results, access_stats, source_mapping = search_and_summarize(
-                    query, model_choice, search_depth, include_youtube, update_progress
-                )
-                
-                # Add to search history
-                st.session_state.search_history.append({
-                    "query": query,
-                    "response": response,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "access_stats": access_stats,
-                    "combined_content": combined_content,
-                    "serper_results": serper_results,
-                    "source_mapping": source_mapping
-                })
-            
-            # Display results OUTSIDE the status block
-            with results_container:
-                total_successful = websites_used + youtube_videos_used
-                success_percentage = round((total_successful / access_stats['target_sources']) * 100)
-                
-                if total_successful >= access_stats['target_sources']:
-                    st.success(f"Success! Found all {access_stats['target_sources']} target sources ({websites_used} websites and {youtube_videos_used} YouTube videos).")
-                else:
-                    st.warning(f"Found {total_successful} of {access_stats['target_sources']} target sources ({success_percentage}%). {blocked_count} websites were blocked/inaccessible.")
-                
-                # Use tabs to separate results and sources
-                tabs = st.tabs(["📝 Summary", "🔍 Sources", "🚫 Blocked Sites", "🌐 Serper API", "🔧 Debug"])
-                
-                # First tab: Summary
-                with tabs[0]:
-                    st.markdown(response)
-                
-                # Second tab: Source details
-                with tabs[1]:
-                    st.text_area("Raw Source Content", combined_content, height=400)
-                
-                # Third tab: Blocked sites
-                with tabs[2]:
-                    st.write(f"#### Access Statistics")
-                    
-                    # Calculate success rate
-                    success_rate = 0
-                    if access_stats['target_sources'] > 0:
-                        success_rate = round((access_stats['successful_websites'] + access_stats['successful_youtube']) / access_stats['target_sources'] * 100)
-                    
-                    # Display target information
-                    st.write(f"Target sources: {access_stats['target_sources']}")
-                    st.write(f"Successfully accessed: {access_stats['successful_websites'] + access_stats['successful_youtube']} ({success_rate}%)")
-                    
-                    # Display detailed statistics
-                    st.write(f"Total attempts: {access_stats['total_attempted']}")
-                    st.write(f"Successful websites: {access_stats['successful_websites']}")
-                    st.write(f"Successful YouTube videos: {access_stats['successful_youtube']}")
-                    st.write(f"Blocked/inaccessible websites: {access_stats['blocked_websites']}")
-                    st.write(f"Failed YouTube videos: {access_stats['failed_youtube']}")
-                    
-                    if access_stats['blocked_urls']:
-                        st.write("#### Blocked Website URLs:")
-                        for url in access_stats['blocked_urls']:
-                            st.write(f"- {url}")
-                    
-                    if access_stats['failed_youtube_urls']:
-                        st.write("#### Failed YouTube URLs:")
-                        for url in access_stats['failed_youtube_urls']:
-                            st.write(f"- {url}")
-                
-                # Fourth tab: Serper API results
-                with tabs[3]:
-                    st.json(serper_results)
-                
-                # Fifth tab: Debug information
-                with tabs[4]:
-                    st.write("#### Source Reference Map")
-                    
-                    # Use the source mapping directly
-                    for source_id, url in source_mapping.items():
-                        st.write(f"- **{source_id}**: [{url}]({url})")
-                    
-                    # Show example of correct citation format
-                    st.write("#### Proper Citation Example")
-                    if source_mapping:
-                        sample_source_id = list(source_mapping.keys())[0]
-                        sample_url = source_mapping[sample_source_id]
-                        st.write(f"Instead of writing: According to [{sample_source_id}]...")
-                        st.write(f"Write: According to [this source]({sample_url})...")
-                    
-                    # Display combined content as markdown
-                    st.write("#### Combined Content as Markdown")
-                    st.text_area("Raw Content for Debugging", combined_content, height=300)
-                    
-        except Exception as e:
-            st.error(f"An error occurred during search: {str(e)}")
-            logging.error(f"Search error: {str(e)}", exc_info=True)  # Log the full exception
-            
-    # Show search history
-    if st.session_state.search_history:
-        with st.expander("📚 Search History", expanded=False):
-            # Create a column for search history
-            history_col = st.container()
-            
-            # Create a column for displaying selected history item
-            result_col = st.container()
-            
-            # Set up session state for selected history item if not present
-            if 'selected_history_item' not in st.session_state:
-                st.session_state.selected_history_item = None
-            
-            
-            # Display search history in first column
-            with history_col:
-                for i, search in enumerate(reversed(st.session_state.search_history)):
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.markdown(f"**{search['timestamp']}**: {search['query']}")
-                    with col2:
-                        if st.button(f"View #{i+1}", key=f"view_{i}"):
-                            st.session_state.selected_history_item = i
-                    st.divider()
-            
-            # Display selected history item in second column
-            with result_col:
-                if st.session_state.selected_history_item is not None:
-                    i = st.session_state.selected_history_item
-                    search = list(reversed(st.session_state.search_history))[i]
-                    
-                    # Display success message
-                    st.success(f"Results for: {search['query']}")
-                    
-                    # Display the response directly without nested tabs or expanders
-                    st.markdown(search['response'])
-                    
-                    # Add tabs for additional information
-                    if 'combined_content' in search and 'serper_results' in search:
-                        details_tabs = st.tabs(["🔍 Sources", "🌐 Serper API", "🔧 Debug"])
-                        with details_tabs[0]:
-                            st.text_area("Raw Source Content", search['combined_content'], height=400)
-                        with details_tabs[1]:
-                            st.json(search['serper_results'])
-                        with details_tabs[2]:
-                            st.write("#### Source Reference Map")
-                            if 'source_mapping' in search:
-                                for source_id, url in search['source_mapping'].items():
-                                    st.write(f"- **{source_id}**: [{url}]({url})")
-                                    
-                                    # Show example of correct citation format
-                                    st.write("#### Proper Citation Example")
-                                    if search['source_mapping']:
-                                        sample_source_id = list(search['source_mapping'].keys())[0]
-                                        sample_url = search['source_mapping'][sample_source_id]
-                                        st.write(f"Instead of writing: According to [{sample_source_id}]...")
-                                        st.write(f"Write: According to [this source]({sample_url})...")
-                            else:
-                                st.warning("Source mapping not available for this search (likely an older search).")
-                        
-                        if st.button("Clear Results", key="clear_results"):
-                            st.session_state.selected_history_item = None
+    if progress_callback: progress_callback("Initiating search...", 0.05)
 
-#===============================================================
+    client = get_openai_client() # Create one client for potential reuse
+    target_sources = 5 if search_depth == "fast" else 10
+    max_attempts = 15 if search_depth == "fast" else 30 # Allow more attempts for deep search
 
-
-
-#CHAT PAGE:
-def get_current_time():
-    """
-    Input: None
-    Process: Gets current time using datetime
-    Output: Returns formatted current time string
-    """
-    current_time = datetime.now()
-    return current_time.strftime("%I:%M %p, %B %d, %Y")
-
-tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "Get the current time.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False
-            }
-        }
-    }]
-
-def get_streaming_response(prompt: str, model_name: str = "openai/gpt-4o", system_prompt: str = None, tools: list = None):
-    """
-    Input: prompt, optional model name, optional system prompt, and optional tools list
-    Process: Generates streaming response using OpenRouter API with function calling support
-    Output: Yields response chunks and returns complete response
-    """
+    # 1. Initial Search
+    if progress_callback: progress_callback("Fetching search results...", 0.1)
     try:
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=st.secrets["OPENROUTER_API_KEY"],
-        )
-
-        messages = [{"role": "user", "content": prompt}]
-        if system_prompt:
-            messages.insert(0, {"role": "system", "content": system_prompt})
-        
-        # Check if it's an Anthropic model
-        is_anthropic = "anthropic" in model_name.lower()
-        
-        # For Anthropic models, don't include tools
-        api_params = {
-            "model": model_name,
-            "messages": messages,
-            "stream": False
-        }
-        
-        if not is_anthropic and tools:
-            api_params["tools"] = tools
-        
-        # First call to check for function calling
-        response = client.chat.completions.create(**api_params)
-
-        # Handle function calling if present
-        if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
-            # Add the assistant's response to messages
-            messages.append(response.choices[0].message.dict())
-            
-            # Process each tool call
-            for tool_call in response.choices[0].message.tool_calls:
-                function_name = tool_call.function.name
-                
-                # Yield information about which tool is being used
-                yield f"\n🔧 Using tool: {function_name}\n", function_name
-                
-                # Execute the tool
-                if function_name == "get_current_time":
-                    tool_result = datetime.now().strftime("%I:%M %p, %B %d, %Y")
-                    
-                    # Add tool result to messages
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": function_name,
-                        "content": json.dumps(tool_result)
-                    })
-
-                    # Yield the tool result for streaming display
-                    yield f"📊 Tool Result: {tool_result}\n", tool_result
-
-            # Get final response with tool result
-            stream_params = {
-                "model": model_name,
-                "messages": messages,
-                "stream": True
-            }
-            if not is_anthropic and tools:
-                stream_params["tools"] = tools
-                
-            stream = client.chat.completions.create(**stream_params)
-
-            full_response = ""
-            for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    yield content, full_response
-
-        else:
-            # Regular streaming response if no function call
-            stream_params = {
-                "model": model_name,
-                "messages": messages,
-                "stream": True
-            }
-            if not is_anthropic and tools:
-                stream_params["tools"] = tools
-                
-            stream = client.chat.completions.create(**stream_params)
-
-            full_response = ""
-            for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    yield content, full_response
-                    
-        return full_response
-            
+        initial_search_results = fetch_serper_results(query, st.secrets["SERPER_API_KEY"])
+        organic_results = initial_search_results.get('organic', [])
     except Exception as e:
-        error_msg = f"Error generating response with {model_name}: {str(e)}"
-        yield error_msg, error_msg
-        return error_msg
+        logging.error(f"Initial search failed: {e}", exc_info=True)
+        raise # Re-raise to be caught by the UI
 
-def chat_page():
+    if not organic_results:
+        logging.warning(f"No organic results found for query: {query}")
+        # Return a result indicating no sources found
+        return {
+            "summary": "No search results found for your query.",
+            "combined_content_display": "N/A",
+            "source_mapping": {},
+            "access_stats": { "target_sources": target_sources, "total_attempted": 0, "successful_websites": 0, "successful_youtube": 0, "blocked_websites": 0, "failed_youtube": 0, "blocked_urls": [], "failed_youtube_urls": [] },
+            "serper_results": initial_search_results,
+            "word_count": 0,
+            "status": "No Results"
+        }
+
+
+    # 2. Gather Content (Initial Pass)
+    if progress_callback: progress_callback("Processing results...", 0.2)
+    website_contents, youtube_contents, blocked_urls, failed_youtube_urls, access_stats = gather_content_from_results(
+        organic_results, target_sources, include_youtube, max_attempts, progress_callback
+    )
+
+    total_successful = access_stats['successful_websites'] + access_stats['successful_youtube']
+    additional_search_results = None # Initialize
+
+    # 3. (Optional) Additional Search if needed
+    if total_successful < target_sources and access_stats['total_attempted'] < max_attempts:
+        if progress_callback: progress_callback(f"Found {total_successful}/{target_sources}. Fetching more results...", 0.7)
+        try:
+            # Simple refinement - could be more sophisticated
+            refined_query = f"{query} detailed information"
+            additional_search_results = fetch_serper_results(refined_query, st.secrets["SERPER_API_KEY"])
+            additional_organic = additional_search_results.get('organic', [])
+
+            if additional_organic:
+                 # Pass only the *remaining* target and attempts
+                remaining_target = target_sources - total_successful
+                remaining_attempts = max_attempts - access_stats['total_attempted']
+
+                # Filter out already processed URLs before passing to gather_content
+                processed_in_first_pass = set(wc['link'] for wc in website_contents) | set(yc['link'] for yc in youtube_contents) | set(blocked_urls) | set(failed_youtube_urls)
+                new_organic_results = [res for res in additional_organic if res.get('link') not in processed_in_first_pass]
+
+
+                if new_organic_results and remaining_target > 0 and remaining_attempts > 0:
+                    add_websites, add_youtube, add_blocked, add_failed_yt, add_stats = gather_content_from_results(
+                        new_organic_results, remaining_target, include_youtube, remaining_attempts, progress_callback
+                    )
+                    # Combine results
+                    website_contents.extend(add_websites)
+                    youtube_contents.extend(add_youtube)
+                    blocked_urls.extend(add_blocked)
+                    failed_youtube_urls.extend(add_failed_yt)
+                    # Update stats carefully
+                    access_stats['successful_websites'] += add_stats['successful_websites']
+                    access_stats['successful_youtube'] += add_stats['successful_youtube']
+                    access_stats['blocked_websites'] += add_stats['blocked_websites']
+                    access_stats['failed_youtube'] += add_stats['failed_youtube']
+                    access_stats['total_attempted'] += add_stats['total_attempted'] # Add attempts from the second round
+                    access_stats['blocked_urls'].extend(add_stats['blocked_urls'])
+                    access_stats['failed_youtube_urls'].extend(add_stats['failed_youtube_urls'])
+
+        except Exception as e:
+            logging.warning(f"Additional search or processing failed: {e}")
+            # Continue with the results obtained so far
+
+    # Check if any content was gathered
+    if not website_contents and not youtube_contents:
+         return {
+            "summary": "Could not retrieve content from any sources for your query.",
+            "combined_content_display": "N/A",
+            "source_mapping": {},
+            "access_stats": access_stats,
+            "serper_results": {"initial": initial_search_results, "additional": additional_search_results},
+            "word_count": 0,
+            "status": "No Content Found"
+        }
+
+
+    # 4. Format Content
+    if progress_callback: progress_callback("Formatting content for AI...", 0.75)
+    formatted_content, combined_content_display, source_mapping = format_content_for_llm(
+        website_contents, youtube_contents
+    )
+
+    # 5. Generate Summary
+    if progress_callback: progress_callback("Generating summary...", 0.8)
+    try:
+        summary = generate_search_summary(
+            query, formatted_content, source_mapping, model_choice, client
+        )
+    except Exception as e:
+        logging.error(f"Summary generation failed: {e}", exc_info=True)
+        raise # Re-raise to be caught by the UI
+
+    if progress_callback: progress_callback("Complete!", 1.0)
+
+    # 6. Compile Final Results
+    word_count = len(combined_content_display.split())
+    final_results = {
+        "summary": summary,
+        "combined_content_display": combined_content_display,
+        "source_mapping": source_mapping,
+        "access_stats": access_stats,
+        "serper_results": {"initial": initial_search_results, "additional": additional_search_results},
+        "word_count": word_count,
+        "status": "Success"
+    }
+    return final_results
+
+
+# --- Utilities ---
+
+def get_current_time() -> str:
     """
     Input: None
-    Process: Creates a basic chat interface with model selection and streaming responses
-    Output: Displays chat interface and handles message exchange
+    Process: Gets the current time.
+    Output: Formatted current time string (e.g., "03:30 PM, July 26, 2024").
     """
-    st.title("AI Chat 💬")
-    
-    # Initialize chat history in session state if not present
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = [{
-            "role": "assistant",
-            "content": "👋 Hi! I'm your AI assistant. How can I help you today?"
-        }]
-    
-    # Model selection - use raw model names directly
-    default_model_index = MODEL_CONFIG.index("google/gemini-2.5-flash-preview")
-    
-    selected_model = st.selectbox(
-        "Select Model:",
-        MODEL_CONFIG,
-        index=default_model_index
-    )
-    
-    # Display chat history
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
-    # Add reset button
-    if st.button("Reset Chat"):
-        st.session_state.chat_history = [{
-            "role": "assistant",
-            "content": "👋 Hi! I'm your AI assistant. How can I help you today?"
-        }]
-        st.rerun()
-    
-    # Chat input
-    if prompt := st.chat_input("Type your message here..."):
-        # Add user message to history
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Format the entire conversation for the API call
-        message_history = []
-        for msg in st.session_state.chat_history:
-            # Skip the first assistant greeting when sending to API
-            if msg == st.session_state.chat_history[0] and msg["role"] == "assistant":
-                continue
-            message_history.append({"role": msg["role"], "content": msg["content"]})
-        
-        # Create the full conversation context
-        full_prompt = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in message_history])
-        
-        # Display assistant response with streaming
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            full_response = ""
-            
-            try:
-                # Stream the response
-                for chunk, current_response in get_streaming_response(
-                    prompt=full_prompt,
-                    model_name=selected_model,
-                    system_prompt="You are a helpful, friendly assistant. Provide concise and accurate responses to the latest user message in the conversation.",
-                    tools=tools
-                ):
-                    full_response = current_response
-                    # Display response with a blinking cursor
-                    message_placeholder.markdown(full_response + "▌")
-                
-                # After streaming completes, display the final message
-                message_placeholder.markdown(full_response)
-                
-                # Add assistant response to history
-                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-                
-            except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                message_placeholder.error(error_msg)
-                st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+    return datetime.now().strftime("%I:%M %p, %B %d, %Y")
+
+# Tool definition for chat function calling
+CHAT_TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "get_current_time",
+        "description": "Get the current date and time.",
+        "parameters": { # Even if no params, structure is needed
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+}]
 
 
-
-#===============================================================
-
-
-# Initialize session state for navigation
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = 'Home'
+# --- UI Page Modules ---
 
 def home_page():
-    """
-    Input: None
-    Process: Handles the home page UI and functionality
-    Output: Renders the home page interface
-    """
-    st.write("## Welcome to My Portfolio!")
-    st.write("I am a passionate developer with expertise in...")
+    """ Renders the Home page content. """
+    st.markdown("## Welcome to My Portfolio!")
+    st.markdown("""
+    I am a passionate developer exploring the intersection of AI, web technologies, and data.
+    This site showcases some experimental tools built with Streamlit and various APIs.
+
+    Navigate using the sidebar to explore:
+    - **Search:** An AI-powered search assistant that synthesizes information from multiple web and YouTube sources.
+    - **Chat:** A conversational AI interface using different language models.
+    """)
+
+def search_page():
+    """ Renders the Search page UI and handles search logic. """
+    st.title("AI-Powered Search Assistant 🔍")
+    st.write("Get comprehensive answers synthesized from multiple web sources and YouTube videos.")
+
+    # Initialize session state for search page specific items if not present
+    if 'include_youtube' not in st.session_state:
+        st.session_state.include_youtube = True
+    if 'search_history' not in st.session_state:
+        st.session_state.search_history = []
+    if 'selected_history_item_search' not in st.session_state: # Use specific key
+        st.session_state.selected_history_item_search = None
+
+    # --- Search Input Area ---
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        query = st.text_input("🔍 Enter your search query:",
+                              placeholder="e.g., Latest advancements in LLM function calling",
+                              key="search_query_input")
+    with col2:
+        search_type = st.selectbox("Search Depth:",
+                                   ["Quick (approx 5 sources)", "Deep (approx 10 sources)"],
+                                   index=0, # Default to Quick
+                                   key="search_depth_select",
+                                   help="Deep search attempts to find more sources but takes longer.")
+
+    col3, col4, col5 = st.columns([2, 2, 1])
+    with col3:
+        # Find index safely, default to 0 if not found
+        try:
+            default_model_index = MODEL_CONFIG.index("google/gemini-2.0-flash-lite-001")
+        except ValueError:
+            default_model_index = 0
+        model_choice = st.selectbox(
+            "AI Model for Summarization:",
+            MODEL_CONFIG,
+            index=default_model_index,
+            key="search_model_select",
+            help="Select the AI model to generate the summary."
+        )
+    with col4:
+        # Use a unique key and manage state explicitly
+        include_youtube_checkbox = st.checkbox("Include YouTube Transcripts",
+                                               value=st.session_state.include_youtube,
+                                               key="include_youtube_checkbox_search",
+                                               help="Include relevant YouTube video transcripts in the search.")
+        # Update session state based on checkbox interaction
+        if include_youtube_checkbox != st.session_state.include_youtube:
+            st.session_state.include_youtube = include_youtube_checkbox
+            # No rerun needed here, state is updated for the *next* search
+
+    with col5:
+        search_button = st.button("🔎 Search", use_container_width=True, key="search_button")
+
+    # --- Search Execution and Results Display ---
+    results_container = st.container() # Placeholder for results
+
+    if search_button and query:
+        search_depth_val = "deep" if "Deep" in search_type else "fast"
+        try:
+            with st.spinner("Performing search and generating summary..."): # Use spinner for better UX
+                 # Use status for progress updates if needed, spinner is simpler
+                 with st.status("🔍 Searching and Processing...", expanded=True) as status_indicator:
+                    search_progress_text = st.empty()
+                    search_progress_bar = st.progress(0.0)
+
+                    def update_search_progress(message, progress_value):
+                        status_indicator.update(label=message)
+                        search_progress_text.text(message)
+                        search_progress_bar.progress(progress_value)
+
+                    # Call the orchestrator function
+                    search_results_data = search_and_summarize_orchestrator(
+                        query,
+                        model_choice,
+                        search_depth_val,
+                        st.session_state.include_youtube, # Use current state
+                        update_search_progress
+                    )
+
+                    status_indicator.update(label="Search complete!", state="complete")
+
+
+            # Store results in history before displaying
+            st.session_state.search_history.append({
+                "query": query,
+                "model_used": model_choice,
+                "search_depth": search_depth_val,
+                "included_youtube": st.session_state.include_youtube,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                **search_results_data # Unpack the results dict
+            })
+            # Set the latest search as the selected one to display immediately
+            st.session_state.selected_history_item_search = len(st.session_state.search_history) - 1
+            st.rerun() # Rerun to display the new result from history
+
+
+        except Exception as e:
+            st.error(f"An error occurred during the search process: {str(e)}")
+            logging.error(f"Search page error for query '{query}': {str(e)}", exc_info=True)
+
+    # --- Display Selected Search Result (from history) ---
+    if st.session_state.selected_history_item_search is not None:
+         # Check index validity
+        if 0 <= st.session_state.selected_history_item_search < len(st.session_state.search_history):
+            selected_index = st.session_state.selected_history_item_search
+            # Access history using the index (newest is at the end)
+            search_data = st.session_state.search_history[selected_index]
+
+            with results_container:
+                st.markdown(f"### Results for: \"{search_data['query']}\"")
+                st.caption(f"Searched on: {search_data['timestamp']} | Model: {search_data['model_used']} | Depth: {search_data['search_depth']} | YouTube: {'Included' if search_data['included_youtube'] else 'Excluded'}")
+
+                access_stats = search_data['access_stats']
+                total_successful = access_stats['successful_websites'] + access_stats['successful_youtube']
+                target = access_stats['target_sources']
+                success_percentage = round((total_successful / target) * 100) if target > 0 else 0
+
+                if search_data['status'] == "Success":
+                    if total_successful >= target:
+                        st.success(f"Successfully gathered content from {total_successful} sources ({access_stats['successful_websites']} websites, {access_stats['successful_youtube']} YouTube).")
+                    else:
+                        st.warning(f"Found {total_successful} of {target} target sources ({success_percentage}%). {access_stats['blocked_websites']} websites blocked/inaccessible, {access_stats['failed_youtube']} YouTube videos failed.")
+                elif search_data['status'] == "No Content Found":
+                     st.error("Could not retrieve content from any sources for this query.")
+                elif search_data['status'] == "No Results":
+                     st.error("No search results found for this query.")
+
+
+                # Display content only if successful or partially successful
+                if search_data['status'] in ["Success", "No Content Found"]: # Show tabs even if no content retrieved, but summary might be empty
+                    tabs = st.tabs(["📝 Summary", "🔍 Sources", "📊 Access Stats", "🌐 Raw Search API", "🔧 Debug Info"])
+
+                    with tabs[0]: # Summary
+                        if search_data['summary']:
+                            st.markdown(search_data['summary'])
+                        else:
+                            st.info("Summary could not be generated (likely due to lack of content).")
+
+                    with tabs[1]: # Sources
+                        st.text_area("Combined Source Content", search_data['combined_content_display'], height=400, key=f"sources_{selected_index}")
+
+                    with tabs[2]: # Access Stats
+                        st.write(f"**Target Sources:** {target}")
+                        st.write(f"**Total Attempts:** {access_stats['total_attempted']}")
+                        st.write(f"**Successfully Accessed:** {total_successful} ({success_percentage}%)")
+                        st.write(f"- Websites: {access_stats['successful_websites']}")
+                        st.write(f"- YouTube Videos: {access_stats['successful_youtube']}")
+                        st.write(f"**Failed/Blocked:**")
+                        st.write(f"- Websites: {access_stats['blocked_websites']}")
+                        st.write(f"- YouTube Videos: {access_stats['failed_youtube']}")
+
+                        if access_stats['blocked_urls']:
+                            with st.expander("Blocked/Inaccessible Website URLs"):
+                                st.json(access_stats['blocked_urls'])
+                        if access_stats['failed_youtube_urls']:
+                            with st.expander("Failed YouTube URLs"):
+                                st.json(access_stats['failed_youtube_urls'])
+
+                    with tabs[3]: # Serper API
+                        st.json(search_data['serper_results'])
+
+                    with tabs[4]: # Debug
+                        st.write("#### Source ID to URL Mapping")
+                        if search_data['source_mapping']:
+                             st.json(search_data['source_mapping'])
+                             # Show citation example using the first source
+                             first_id = list(search_data['source_mapping'].keys())[0]
+                             first_url = search_data['source_mapping'][first_id]
+                             st.write("---")
+                             st.write("**Proper Citation Example:**")
+                             st.markdown(f"Text referencing the source should look like: `[description]({first_url})`")
+                             st.markdown(f"**Incorrect:** Using `[{first_id}]`")
+                        else:
+                            st.info("No sources were successfully processed to create a mapping.")
+
+                # Button to clear the displayed result area
+                if st.button("Clear Displayed Result", key=f"clear_search_{selected_index}"):
+                    st.session_state.selected_history_item_search = None
+                    st.rerun()
+        else:
+             # Handle invalid index if necessary (e.g., history was cleared)
+             st.session_state.selected_history_item_search = None
+             st.warning("Selected history item is no longer valid. Please select another.")
+             # Optionally rerun: st.rerun()
+
+
+    # --- Search History Display ---
+    if st.session_state.search_history:
+        with st.expander("📚 Search History", expanded=False):
+            # Display history items (newest first)
+            for i, search in enumerate(reversed(st.session_state.search_history)):
+                 history_index = len(st.session_state.search_history) - 1 - i # Original index
+                 col1_hist, col2_hist = st.columns([4, 1])
+                 with col1_hist:
+                     st.markdown(f"**{search['timestamp']}**: `{search['query']}`")
+                     st.caption(f"Model: {search['model_used']}, Depth: {search['search_depth']}, YouTube: {'Yes' if search['included_youtube'] else 'No'}")
+                 with col2_hist:
+                     # Highlight the currently viewed item
+                     button_type = "primary" if history_index == st.session_state.selected_history_item_search else "secondary"
+                     if st.button(f"View Result #{i+1}", key=f"view_search_{history_index}", use_container_width=True, type=button_type):
+                         st.session_state.selected_history_item_search = history_index
+                         st.rerun() # Rerun to display the selected item above
+                 st.divider()
+
+            if st.button("Clear Search History", key="clear_search_history_button"):
+                 st.session_state.search_history = []
+                 st.session_state.selected_history_item_search = None
+                 st.rerun()
+
+
+def chat_page():
+    """ Renders the Chat page UI and handles chat interactions. """
+    st.title("AI Chat 💬")
+
+    # Initialize chat history in session state if not present
+    if 'chat_sessions' not in st.session_state:
+        st.session_state.chat_sessions = {} # Store multiple sessions {session_id: {history: [], model: ""}}
+    if 'current_chat_session_id' not in st.session_state:
+        st.session_state.current_chat_session_id = None
+    if 'chat_session_counter' not in st.session_state:
+        st.session_state.chat_session_counter = 0 # To generate unique IDs
+
+    # --- Session Management ---
+    st.sidebar.title("Chat Sessions")
+
+    # Button to start a new chat
+    if st.sidebar.button("➕ New Chat"):
+        st.session_state.chat_session_counter += 1
+        new_session_id = f"session_{st.session_state.chat_session_counter}"
+        st.session_state.chat_sessions[new_session_id] = {
+            "history": [{"role": "assistant", "content": "👋 Hi! How can I help you today?"}],
+            "model": MODEL_CONFIG[MODEL_CONFIG.index("google/gemini-2.5-flash-preview")] # Default model for new chat
+        }
+        st.session_state.current_chat_session_id = new_session_id
+        st.rerun()
+
+    # List existing chat sessions
+    session_ids = list(st.session_state.chat_sessions.keys())
+    session_display_names = {}
+    for sid in session_ids:
+         # Try to get the first user message as the name, fallback to ID
+        history = st.session_state.chat_sessions[sid]['history']
+        first_user_message = next((msg['content'] for msg in history if msg['role'] == 'user'), None)
+        display_name = f"{first_user_message[:30]}..." if first_user_message else sid
+        session_display_names[sid] = display_name
+
+    # Select current session
+    st.session_state.current_chat_session_id = st.sidebar.radio(
+        "Select Chat:",
+        options=session_ids,
+        format_func=lambda sid: session_display_names.get(sid, sid),
+        key="chat_session_selector",
+        index=session_ids.index(st.session_state.current_chat_session_id) if st.session_state.current_chat_session_id in session_ids else 0
+    )
+
+    # --- Chat Interface for the selected session ---
+    if st.session_state.current_chat_session_id and st.session_state.current_chat_session_id in st.session_state.chat_sessions:
+        current_session = st.session_state.chat_sessions[st.session_state.current_chat_session_id]
+        chat_history = current_session["history"]
+
+        # Model selection for the current chat
+        try:
+            current_model_index = MODEL_CONFIG.index(current_session["model"])
+        except ValueError:
+            current_model_index = MODEL_CONFIG.index("google/gemini-2.5-flash-preview") # Fallback
+
+        selected_model = st.selectbox(
+            "Select Model for this Chat:",
+            MODEL_CONFIG,
+            index=current_model_index,
+            key=f"model_select_{st.session_state.current_chat_session_id}" # Key specific to session
+        )
+        # Update model for the session if changed
+        if selected_model != current_session["model"]:
+            current_session["model"] = selected_model
+            # No rerun needed, just updates the state for the next message
+
+        # Display chat history
+        chat_container = st.container() # To hold messages
+        with chat_container:
+            for message in chat_history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+        # Chat input
+        if prompt := st.chat_input("Type your message here...", key=f"chat_input_{st.session_state.current_chat_session_id}"):
+            # Add user message to the current session's history
+            chat_history.append({"role": "user", "content": prompt})
+
+            # Rerun to display the user message immediately
+            st.rerun()
+
+        # --- Generate response if the last message is from the user ---
+        if chat_history and chat_history[-1]["role"] == "user":
+            user_prompt = chat_history[-1]["content"] # Get the latest user prompt
+
+            # Display user message (already done by rerun, but good practice)
+            # with st.chat_message("user"):
+            #    st.markdown(user_prompt)
+
+            # Prepare message history for API (excluding initial greeting)
+            api_messages = [msg for msg in chat_history if not (msg == chat_history[0] and msg["role"] == "assistant")]
+
+            # Display assistant response with streaming
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response_content = ""
+                try:
+                    # Use the streaming function
+                    response_generator = get_streaming_llm_response(
+                        messages=api_messages,
+                        model_name=current_session["model"], # Use session's model
+                        tools=CHAT_TOOLS # Pass defined tools
+                    )
+
+                    for chunk, current_response_or_signal in response_generator:
+                        # Check if it's a signal or actual content
+                        if isinstance(current_response_or_signal, str) and current_response_or_signal.startswith(("tool_call:", "tool_result:", "tool_error:")):
+                             # Display tool usage signals/results if desired
+                             # st.write(chunk) # Optional: show tool activity in chat
+                             pass # Or just ignore these signals in the main chat display
+                        else:
+                            # It's content, update the placeholder
+                            full_response_content = current_response_or_signal
+                            message_placeholder.markdown(full_response_content + "▌") # Blinking cursor
+
+                    # Final display without cursor
+                    message_placeholder.markdown(full_response_content)
+
+                    # Add final assistant response to history
+                    chat_history.append({"role": "assistant", "content": full_response_content})
+                    # No rerun needed here, message is already displayed
+
+                except Exception as e:
+                    error_msg = f"Error generating response: {str(e)}"
+                    message_placeholder.error(error_msg)
+                    chat_history.append({"role": "assistant", "content": f"Error: {error_msg}"}) # Log error in history
+                    logging.error(f"Chat page streaming error: {e}", exc_info=True)
+
+        # Option to clear the current chat session
+        if st.button("Clear Current Chat", key=f"clear_chat_{st.session_state.current_chat_session_id}"):
+            current_session["history"] = [{"role": "assistant", "content": "Chat cleared. How can I help?"}]
+            st.rerun()
+
+        # Option to delete the current chat session
+        if st.sidebar.button(f"🗑️ Delete '{session_display_names[st.session_state.current_chat_session_id]}'", key=f"delete_chat_{st.session_state.current_chat_session_id}"):
+             del st.session_state.chat_sessions[st.session_state.current_chat_session_id]
+             # Select the first available session or set to None if empty
+             available_sessions = list(st.session_state.chat_sessions.keys())
+             st.session_state.current_chat_session_id = available_sessions[0] if available_sessions else None
+             st.rerun()
+
+    else:
+        st.info("Click 'New Chat' in the sidebar to start a conversation.")
+
+
+# --- Main Application ---
 
 def main():
-    # Sidebar navigation
+    """ Main function to run the Streamlit application and handle navigation. """
+    # Initialize session state for navigation if it doesn't exist
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 'Home' # Default page
+
+    # Sidebar for navigation
     with st.sidebar:
+        st.markdown("---") # Separator before navigation
         st.title("Navigation")
+        # Use st.session_state.current_page to set the default selected radio button
+        pages = ["Home", "Search", "Chat"]
+        try:
+            current_page_index = pages.index(st.session_state.current_page)
+        except ValueError:
+            current_page_index = 0 # Default to Home if state is invalid
+
         selected_page = st.radio(
             "Go to",
-            ["Home", "Search", "Chat"],
-            key="navigation"
+            options=pages,
+            key="navigation_radio",
+            index=current_page_index
         )
-        st.session_state.current_page = selected_page
 
-    # Main content area
-    st.title(f"{st.session_state.current_page}")
-    
+        # Update state if selection changes
+        if selected_page != st.session_state.current_page:
+            st.session_state.current_page = selected_page
+            # Clear selected history item when switching pages to avoid confusion
+            st.session_state.selected_history_item_search = None
+            st.rerun() # Rerun to load the new page
+
+    # Display the selected page title dynamically
+    # st.title(f"{st.session_state.current_page} Page") # Title is set within each page function now
+
     # Page content based on selection
     if st.session_state.current_page == "Home":
         home_page()
