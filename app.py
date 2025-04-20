@@ -91,7 +91,6 @@ def get_llm_response(
         logging.error(f"Error generating response with {model_name}: {str(e)}", exc_info=True)
         raise Exception(f"Error generating response with {model_name}: {str(e)}")
 
-
 def get_streaming_llm_response(
     messages: List[Dict[str, str]],
     model_name: str = "openai/gpt-4o",
@@ -100,15 +99,16 @@ def get_streaming_llm_response(
 ) -> Generator[Tuple[str, str], None, None]:
     """
     Input: List of messages, optional model name, optional tools list, optional OpenAI client.
-    Process: Generates a streaming response using OpenRouter API, handling potential function calls.
-    Output: Yields tuples of (chunk, full_response_so_far). Returns the final full response string upon completion or error.
+    Process: Generates a streaming response using OpenRouter API, handling potential function calls,
+             including the web search tool.
+    Output: Yields tuples of (chunk, full_response_so_far_or_signal).
+            Signals can be 'tool_call:...' or 'tool_feedback:...'
     """
     if client is None:
         client = get_openai_client()
 
     try:
-        # Check if it's an Anthropic model (which might not support tools well or require different handling)
-        is_anthropic = "anthropic" in model_name.lower()
+        is_anthropic = "anthropic" in model_name.lower() # Anthropic might handle tools differently
 
         # --- Initial Call (Check for Tool Use) ---
         api_params = {
@@ -116,9 +116,10 @@ def get_streaming_llm_response(
             "messages": messages,
             "stream": False # First call is non-streaming to check for tool_calls
         }
+        # Only send tools if the model likely supports them and tools are provided
         if not is_anthropic and tools:
             api_params["tools"] = tools
-            api_params["tool_choice"] = "auto" # Explicitly allow model to choose
+            api_params["tool_choice"] = "auto"
 
         response = client.chat.completions.create(**api_params)
         response_message = response.choices[0].message
@@ -128,52 +129,104 @@ def get_streaming_llm_response(
         # --- Handle Tool Calls ---
         if tool_calls:
             # Append the assistant's response (requesting tool use) to messages
-            messages.append(response_message.dict(exclude_unset=True)) # Use dict representation
+            messages.append(response_message.dict(exclude_unset=True))
 
-            available_functions = {
-                "get_current_time": get_current_time,
-            }
+            # available_functions defined globally now
+            global AVAILABLE_FUNCTIONS
+
+            tool_results_for_api = [] # Collect results before the next API call
 
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
-                function_to_call = available_functions.get(function_name)
+                function_to_call = AVAILABLE_FUNCTIONS.get(function_name)
+                tool_call_id = tool_call.id
 
-                yield f"\n🔧 Using tool: {function_name}\n", f"tool_call:{function_name}" # Signal tool use
+                yield f"🔧 Requesting Tool: `{function_name}`\n", f"tool_call:{function_name}" # Signal tool use
 
                 if function_to_call:
-                    # Note: Currently no function arguments are defined/expected
-                    # function_args = json.loads(tool_call.function.arguments) # If args were needed
-                    function_response = function_to_call()
-                    tool_result_str = json.dumps(function_response) # Ensure result is JSON string
+                    try:
+                        # Parse arguments
+                        function_args = json.loads(tool_call.function.arguments)
+                        logging.info(f"Calling tool {function_name} with args: {function_args}")
 
-                    messages.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": function_name,
-                        "content": tool_result_str,
-                    })
-                    yield f"📊 Tool Result ({function_name}): {function_response}\n", f"tool_result:{tool_result_str}" # Signal tool result
+                        # --- Special Handling for Search Tool Feedback ---
+                        if function_name == "perform_web_search":
+                            # Create a simple callback to yield feedback
+                            def search_progress_feedback(message, progress_value):
+                                # Yield feedback directly from the callback
+                                # We prefix with 'tool_feedback:' to distinguish it
+                                yield f"⏳ Search Progress: {message} ({progress_value:.0%})", f"tool_feedback:{message}"
+
+                            # Use a placeholder generator for feedback
+                            feedback_generator = search_progress_feedback("Starting...", 0.0)
+                            # Yield the initial message
+                            chunk, signal = next(feedback_generator)
+                            yield chunk, signal
+
+                            # Call the search tool wrapper, passing the *generator* as the callback
+                            # This is a bit tricky; the wrapper needs to call next() on it.
+                            # Let's simplify: yield *before* and *after* the call instead.
+
+                            search_query = function_args.get('query', 'Unknown query')
+                            yield f"⏳ Performing search for: '{search_query}'...", f"tool_feedback:Searching..."
+
+                            # --- Execute the tool ---
+                            # We won't use the progress callback directly here for simplicity
+                            # The wrapper function (_execute_search_tool) uses st.toast
+                            function_response = function_to_call(**function_args) # Pass parsed args
+
+                            yield f"✅ Search tool finished.", f"tool_feedback:Search Complete"
+
+                        else:
+                             # --- Execute other tools (like get_current_time) ---
+                             # Assumes other tools are fast and don't need progress feedback
+                             function_response = function_to_call(**function_args)
+
+                        # Ensure result is JSON string for the API
+                        tool_result_str = json.dumps(function_response)
+                        logging.info(f"Tool {function_name} result: {tool_result_str}")
+
+                        # Prepare result message for the next API call
+                        tool_results_for_api.append({
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": tool_result_str,
+                        })
+                        # Yield result summary (optional, might be verbose)
+                        # yield f"📊 Tool Result ({function_name}): {tool_result_str}\n", f"tool_result:{tool_result_str}"
+
+                    except Exception as e:
+                        logging.error(f"Error executing tool {function_name}: {e}", exc_info=True)
+                        yield f"⚠️ Error executing tool '{function_name}': {e}\n", f"tool_error:{str(e)}"
+                        # Provide an error response for the tool call
+                        tool_results_for_api.append({
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": json.dumps({"error": str(e)}),
+                        })
                 else:
-                     # Handle case where function is not found (optional)
-                    yield f"⚠️ Tool '{function_name}' not found.\n", f"tool_error:not_found"
-                    messages.append({ # Still need to provide a response for the tool call
-                        "tool_call_id": tool_call.id,
+                     # Handle case where function is not found
+                     yield f"⚠️ Tool '{function_name}' not found.\n", f"tool_error:not_found"
+                     tool_results_for_api.append({
+                        "tool_call_id": tool_call_id,
                         "role": "tool",
                         "name": function_name,
                         "content": json.dumps({"error": f"Function {function_name} not found"}),
-                    })
+                     })
 
+            # Append all tool results to messages
+            messages.extend(tool_results_for_api)
 
             # --- Second Call (With Tool Results) ---
+            yield "🧠 Processing tool results and generating final answer...", "tool_feedback:Generating final answer..."
             stream_params = {
                 "model": model_name,
                 "messages": messages,
                 "stream": True
             }
-            # Don't send tools again if the model already decided to use them
-            # if not is_anthropic and tools:
-            #     stream_params["tools"] = tools
-
+            # Don't send tools definition again in the second call
             stream = client.chat.completions.create(**stream_params)
             full_response = ""
             for chunk in stream:
@@ -181,18 +234,20 @@ def get_streaming_llm_response(
                 if content:
                     full_response += content
                     yield content, full_response
-            # return full_response # Generator implicitly returns None
+            # Generator implicitly returns None
 
         # --- No Tool Calls ---
         else:
-            # Regular streaming response
+            # Regular streaming response if no tools were called
             stream_params = {
                 "model": model_name,
-                "messages": messages,
+                "messages": messages, # Use original messages
                 "stream": True
             }
-            if not is_anthropic and tools: # Still offer tools if none were chosen initially
+            # Still offer tools if none were chosen initially, if applicable
+            if not is_anthropic and tools:
                 stream_params["tools"] = tools
+                # No tool_choice needed if we just want to stream the direct answer
 
             stream = client.chat.completions.create(**stream_params)
             full_response = ""
@@ -201,13 +256,13 @@ def get_streaming_llm_response(
                 if content:
                     full_response += content
                     yield content, full_response
-            # return full_response # Generator implicitly returns None
+            # Generator implicitly returns None
 
     except Exception as e:
         error_msg = f"Error generating streaming response with {model_name}: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        yield error_msg, error_msg # Yield error message
-        # return error_msg # Generator implicitly returns None
+        yield error_msg, error_msg # Yield error message as content and signal
+        # Generator implicitly returns None
 
 
 # --- Content Fetching & Processing Modules ---
@@ -243,7 +298,6 @@ def fetch_serper_results(query: str, api_key: str) -> Dict[str, Any]:
         logging.error(f"Failed to decode Serper API response for query '{query}': {e}")
         raise Exception("Failed to parse search results.")
 
-
 def fetch_youtube_transcript(video_url: str) -> Optional[str]:
     """
     Input: YouTube video URL.
@@ -264,7 +318,6 @@ def fetch_youtube_transcript(video_url: str) -> Optional[str]:
         # Handles cases like transcripts disabled, video unavailable, etc.
         logging.warning(f"Could not fetch transcript for {video_url}: {e}")
         return None
-
 
 def clean_web_content(html_content: str, url: str) -> str:
     """
@@ -349,7 +402,6 @@ def clean_web_content(html_content: str, url: str) -> str:
 
     return content if content else "No main content found."
 
-
 def fetch_and_clean_website(url: str, timeout: int = 10) -> Optional[str]:
     """
     Input: Website URL, request timeout duration.
@@ -394,7 +446,6 @@ def fetch_and_clean_website(url: str, timeout: int = 10) -> Optional[str]:
 
 
 # --- Search Orchestration Module ---
-
 def gather_content_from_results(
     organic_results: List[Dict[str, Any]],
     target_sources: int,
@@ -509,7 +560,6 @@ def gather_content_from_results(
 
     return website_contents, youtube_contents, blocked_urls, failed_youtube_urls, access_stats
 
-
 def format_content_for_llm(
     website_contents: List[Dict],
     youtube_contents: List[Dict]
@@ -545,7 +595,6 @@ def format_content_for_llm(
 
     combined_content_display = "\n\n".join(combined_content_display_parts)
     return formatted_content.strip(), combined_content_display, source_mapping
-
 
 def generate_search_summary(
         query: str,
@@ -626,7 +675,6 @@ Content Guidelines:
     except Exception as e:
         logging.error(f"Summary generation failed: {e}", exc_info=True)
         raise Exception(f"Summary generation error: {str(e)}")
-
 
 def search_and_summarize_orchestrator(
     query: str,
@@ -769,7 +817,6 @@ def search_and_summarize_orchestrator(
     }
     return final_results
 
-
 # --- Utilities ---
 
 def get_current_time() -> str:
@@ -780,21 +827,118 @@ def get_current_time() -> str:
     """
     return datetime.now().strftime("%I:%M %p, %B %d, %Y")
 
-# Tool definition for chat function calling
-CHAT_TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "get_current_time",
-        "description": "Get the current date and time.",
-        "parameters": { # Even if no params, structure is needed
-            "type": "object",
-            "properties": {},
-            "required": []
+def _execute_search_tool(query: str, progress_callback: Optional[callable] = None) -> Dict[str, Any]:
+    """
+    Wrapper function for the search orchestrator to be used as an LLM tool.
+    Handles calling the search, setting defaults, and formatting the result.
+    """
+    st.toast(f"🔎 Performing web search for: '{query}'...") # Immediate feedback
+    if progress_callback: progress_callback(f"🚀 Starting web search for: '{query}'", 0.0)
+
+    # --- Configuration for Search Tool ---
+    # Use a relatively fast model for the internal summarization step
+    # Keep search depth 'fast' to reduce latency during chat
+    SEARCH_TOOL_MODEL = "google/gemini-2.0-flash-lite-001"
+    SEARCH_TOOL_DEPTH = "fast"
+    SEARCH_TOOL_YOUTUBE = True
+    # ------------------------------------
+
+    search_summary = "Search could not be completed."
+    search_status = "Error"
+    source_info = "No sources retrieved."
+    full_result = {}
+
+    try:
+        # Note: The orchestrator's progress callback updates the main status indicator
+        # We might not need to pass a separate one here unless we want finer control
+        # within the tool execution message itself.
+        search_results_data = search_and_summarize_orchestrator(
+            query=query,
+            model_choice=SEARCH_TOOL_MODEL,
+            search_depth=SEARCH_TOOL_DEPTH,
+            include_youtube=SEARCH_TOOL_YOUTUBE,
+            progress_callback=progress_callback # Pass the callback down
+        )
+        full_result = search_results_data # Store for potential detailed return
+
+        search_summary = search_results_data.get("summary", "No summary generated.")
+        search_status = search_results_data.get("status", "Unknown")
+
+        # Create a concise source info string
+        stats = search_results_data.get("access_stats", {})
+        web_count = stats.get('successful_websites', 0)
+        yt_count = stats.get('successful_youtube', 0)
+        total_sources = web_count + yt_count
+        if total_sources > 0:
+             source_info = f"Based on {total_sources} source(s) ({web_count} web, {yt_count} YouTube)."
+        elif search_status == "Success": # Success but 0 sources? Should not happen often
+             source_info = "Search completed, but no content could be extracted from sources."
+        elif search_status == "No Content Found":
+             source_info = "Search found potential sources, but could not retrieve content."
+        elif search_status == "No Results":
+             source_info = "No relevant search results found."
+
+        if progress_callback: progress_callback(f"✅ Web search complete. Status: {search_status}", 1.0)
+        st.toast(f"✅ Search complete. Status: {search_status}")
+
+    except Exception as e:
+        logging.error(f"Error executing search tool for query '{query}': {e}", exc_info=True)
+        search_summary = f"An error occurred during the search: {str(e)}"
+        search_status = "Execution Error"
+        source_info = "Search failed due to an internal error."
+        if progress_callback: progress_callback(f"❌ Web search failed!", 1.0)
+        st.toast(f"❌ Search failed!")
+
+
+    # Return a structured result for the LLM
+    # Keep it concise: summary + source info is most useful for the LLM to synthesize an answer
+    return {
+        "status": search_status,
+        "summary": search_summary,
+        "source_info": source_info
+        # "full_results": full_result # Optional: Could return everything, but might be too verbose
+    }
+
+
+# --- Tool Definitions (Update CHAT_TOOLS) ---
+
+CHAT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "Get the current date and time.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "perform_web_search",
+            "description": "Use this tool to find current information, answer questions about recent events, or look up topics not covered in your training data. Performs a web search using multiple sources (websites, YouTube) and returns a concise summary of the findings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The specific search query to use. Should be targeted and descriptive.",
+                    }
+                },
+                "required": ["query"],
+            },
         }
     }
-}]
+]
 
-
+# Map tool names to functions
+AVAILABLE_FUNCTIONS = {
+    "get_current_time": get_current_time,
+    "perform_web_search": _execute_search_tool, # Map to the wrapper
+}
 # --- UI Page Modules ---
 
 def home_page():
