@@ -2,10 +2,6 @@ What:
 
 - A website/porfolio of myself. Showing my works, track record
 
-Why
-
-How
-
 
 SEARCH TODO:
 
@@ -16,3 +12,9 @@ Quick search:
 Deep search mode:
 
 - Many pages (5-10) and 1-3 youtube videos.
+
+
+CHAT:
+
+- [ ] Upload files
+- [X] Search function
