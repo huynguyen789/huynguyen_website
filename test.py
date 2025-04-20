@@ -665,7 +665,7 @@ def chat_page():
             # No rerun needed, just updates the state for the next message
 
         # Display chat history
-        chat_container = st.container(height=500, border=False) # Set height for scrollability
+        chat_container = st.container( border=False) # Set height for scrollability
         with chat_container:
             for message in chat_history:
                 with st.chat_message(message["role"]):
@@ -705,12 +705,19 @@ def chat_page():
                         # Check if it's a signal or actual content
                         if isinstance(current_response_or_signal, str):
                             if current_response_or_signal.startswith("tool_call:"):
+                                # Keep this - shows the tool is being called
                                 tool_activity_log.append(f"```\n🔧 Calling Tool: {current_response_or_signal.split(':', 1)[1]}\n```")
+                                # Update placeholder immediately to show the call
+                                message_placeholder.markdown(full_response_content + "\n" + "\n".join(tool_activity_log) + "▌")
                             elif current_response_or_signal.startswith("tool_feedback:"):
-                                tool_activity_log.append(f"```\n⏳ Status: {current_response_or_signal.split(':', 1)[1]}\n```")
+                                # --- CHANGE HERE ---
+                                # Show feedback as a toast, don't add to permanent log
+                                feedback_message = current_response_or_signal.split(':', 1)[1]
+                                st.toast(f"⏳ {feedback_message}")
+                                # --- END CHANGE ---
                             elif current_response_or_signal.startswith("tool_error:"):
+                                # Keep this - show errors
                                 tool_activity_log.append(f"```\n⚠️ Tool Error: {current_response_or_signal.split(':', 1)[1]}\n```")
-                                # Display errors immediately below the main response
                                 message_placeholder.markdown(full_response_content + "\n" + "\n".join(tool_activity_log) + "▌")
                             elif current_response_or_signal.startswith("error:"): # General errors
                                  tool_activity_log.append(f"```\n🚨 Error: {current_response_or_signal.split(':', 1)[1]}\n```")
@@ -718,8 +725,8 @@ def chat_page():
                             else:
                                 # It's content, update the placeholder
                                 full_response_content = current_response_or_signal
-                                # Display content and any accumulated tool logs below it
-                                message_placeholder.markdown(full_response_content + "\n" + "\n".join(tool_activity_log) + "▌") # Blinking cursor
+                                # Display content and only the relevant tool logs (calls/errors)
+                                message_placeholder.markdown(full_response_content + "\n" + "\n".join(tool_activity_log) + "▌")
                         else:
                              # Should not happen based on generator output type hint, but handle defensively
                              logger.warning(f"Unexpected item type from generator: {type(current_response_or_signal)}")
