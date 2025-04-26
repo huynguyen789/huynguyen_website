@@ -23,6 +23,10 @@ import os # Needed for environment variables check in tool (optional)
 
 # --- Import the standalone search module ---
 import tools.ai_search as ai_search
+# --- Import the voice chat module ---
+# from voice_chat import voice_chat_page # Removed
+# --- Import Tool Functions ---
+from tools.tools import get_current_time, perform_web_search # Updated import
 
 # --- Configuration ---
 
@@ -73,67 +77,9 @@ def get_openai_client() -> OpenAI:
         api_key=st.secrets["OPENROUTER_API_KEY"],
     )
 
-# --- Tool Function Implementations ---
 
-def get_current_time() -> str:
-    """
-    Input: None
-    Process: Gets the current time.
-    Output: Formatted current time string (e.g., "03:30 PM, July 26, 2024").
-    """
-    return datetime.now().strftime("%I:%M %p, %B %d, %Y")
-
-def perform_web_search(query: str) -> Dict[str, Any]:
-    """
-    Tool function wrapper for the AI search module.
-    Input: Search query string.
-    Process: Calls the standalone search function and extracts the summary.
-            Requires SERPER_API_KEY and OPENROUTER_API_KEY environment variables.
-    Output: Dictionary containing the search summary or an error message.
-    """
-    st.toast(f"Performing web search for: '{query}'...") # Simple feedback in UI
-
-    # Check if required API keys are available (as environment variables for ai_search.py)
-    if not os.environ.get("SERPER_API_KEY") or not os.environ.get("OPENROUTER_API_KEY"):
-         logger.error("Search tool cannot run: SERPER_API_KEY or OPENROUTER_API_KEY environment variable missing.")
-         # Also inform the LLM
-         return {"error": "Search tool configuration error: API key environment variables missing."}
-
-    try:
-        # Use a default model suitable for summarization within the tool context
-        # Use 'fast' search depth for tool calls to keep them quicker.
-        logger.info(f"Tool 'perform_web_search' executing ai_search.search for query: '{query}'")
-        search_result = ai_search.search(
-            query=query,
-            model="google/gemini-2.0-flash-001", # Fast model for tool summary
-            search_depth="fast",
-            include_youtube=True # Include YouTube by default for tool use
-        )
-        logger.info(f"Tool 'perform_web_search' received result: status={search_result['status']}")
-
-        # Process the result for the LLM
-        if search_result["status"] in ["success", "no_content"]:
-            summary = search_result.get("summary", "Search completed, but no summary could be generated.")
-            # Optionally add a few source links for context?
-            sources = search_result.get("visited_links", [])[:3] # Get top 3 links
-            response_data = {
-                "summary": summary if summary else "No specific summary generated.",
-                "top_sources_checked": sources
-            }
-            return response_data
-        elif search_result["status"] == "no_results":
-            return {"summary": "No search results found for the query."}
-        else: # Error case
-            error_msg = search_result.get("error_message", "An unknown error occurred during search.")
-            logger.error(f"Search tool failed with status {search_result['status']}: {error_msg}")
-            return {"error": f"Search failed: {error_msg}"}
-
-    except Exception as e:
-        logger.error(f"Error calling ai_search.search from tool: {e}", exc_info=True)
-        return {"error": f"Failed to execute search tool: {str(e)}"}
 
 # --- Tool Definitions and Mapping ---
-
 CHAT_TOOLS = [
     {
         "type": "function",
@@ -169,8 +115,8 @@ CHAT_TOOLS = [
 # Map tool names to functions - THIS MUST BE DEFINED BEFORE get_streaming_llm_response USES IT
 # Make it global or ensure definition order. Global is simpler here.
 AVAILABLE_FUNCTIONS = {
-    "get_current_time": get_current_time,
-    "perform_web_search": perform_web_search, # Add the new search tool function
+    "get_current_time": get_current_time, # Uses function from tools.tools
+    "perform_web_search": perform_web_search, # Uses function from tools.tools
 }
 
 # --- LLM Response Generation (Modified get_streaming_llm_response) ---
@@ -777,7 +723,7 @@ def main():
         st.markdown("---") # Separator before navigation
         st.title("Navigation")
         # Use st.session_state.current_page to set the default selected radio button
-        pages = ["Home", "Search", "Chat"]
+        pages = ["Home", "Search", "Chat"] # Removed "Voice Chat"
         try:
             current_page_index = pages.index(st.session_state.current_page)
         except ValueError:
@@ -805,6 +751,8 @@ def main():
         search_page()
     elif st.session_state.current_page == "Chat":
         chat_page()
+    # elif st.session_state.current_page == "Voice Chat": # Removed
+    #     voice_chat_page() # Removed
 
 if __name__ == "__main__":
     # Crucial: Ensure API keys are loaded from secrets into environment variables
@@ -816,13 +764,8 @@ if __name__ == "__main__":
         os.environ["SERPER_API_KEY"] = st.secrets["SERPER_API_KEY"]
     if "OPENROUTER_API_KEY" in st.secrets:
         os.environ["OPENROUTER_API_KEY"] = st.secrets["OPENROUTER_API_KEY"]
-
-    # Check again after attempting to load from secrets
-    if not os.environ.get("SERPER_API_KEY"):
-        logger.warning("SERPER_API_KEY environment variable not set. Search functionality might fail.")
-        # Don't necessarily stop the whole app, but log a warning.
-        # The pages themselves will show errors if needed.
-    if not os.environ.get("OPENROUTER_API_KEY"):
-         logger.warning("OPENROUTER_API_KEY environment variable not set. Search/Chat functionality might fail.")
+    # Also load GEMINI_API_KEY for the Voice Chat page # Removed
+    # if "GEMINI_API_KEY" in st.secrets: # Removed
+    #     os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"] # Removed
 
     main()
