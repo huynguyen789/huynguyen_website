@@ -85,9 +85,18 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE):
+    def __init__(self, video_mode=DEFAULT_MODE, text_callback=None):
+        """
+        Input:
+            video_mode (str): 'camera', 'screen', or 'none'
+            text_callback (callable): function to call with text output
+        Process:
+            Initializes audio/video session.
+        Output:
+            None
+        """
         self.video_mode = video_mode
-
+        self.text_callback = text_callback
         self.audio_in_queue = None
         self.out_queue = None
 
@@ -97,15 +106,29 @@ class AudioLoop:
         self.receive_audio_task = None
         self.play_audio_task = None
 
-    async def send_text(self):
+        self.audio_stream = None
+
+    async def send_text_loop(self):
+        """
+        Input: None
+        Process: Loops, reading user input from CLI and sending to model.
+        Output: None
+        """
         while True:
-            text = await asyncio.to_thread(
-                input,
-                "message > ",
-            )
+            text = await asyncio.to_thread(input, "message > ")
             if text.lower() == "q":
                 break
             await self.session.send(input=text or ".", end_of_turn=True)
+
+    async def send_text(self, text: str):
+        """
+        Input: text (str): User message to send
+        Process: Sends text to the model session.
+        Output: None
+        """
+        if text.lower() == "q":
+            raise asyncio.CancelledError("User requested exit")
+        await self.session.send(input=text or ".", end_of_turn=True)
 
     def _get_frame(self, cap):
         # Read the frameq
@@ -181,7 +204,17 @@ class AudioLoop:
             await self.session.send(input=msg)
 
     async def listen_audio(self):
-        mic_info = pya.get_default_input_device_info()
+        # Try to use 'MacBook Pro Microphone' if available, else use default
+        mic_name_to_use = "MacBook Pro Microphone"
+        mic_info = None
+        for i in range(pya.get_device_count()):
+            info = pya.get_device_info_by_index(i)
+            if mic_name_to_use in info["name"] and info["maxInputChannels"] > 0:
+                mic_info = info
+                break
+        if mic_info is None:
+            mic_info = pya.get_default_input_device_info()
+        print(f"[INFO] Using microphone: {mic_info['name']} (index {mic_info['index']})")
         self.audio_stream = await asyncio.to_thread(
             pya.open,
             format=FORMAT,
@@ -208,7 +241,10 @@ class AudioLoop:
                     self.audio_in_queue.put_nowait(data)
                     continue
                 if text := response.text:
-                    print(text, end="")
+                    if self.text_callback:
+                        self.text_callback(text)
+                    else:
+                        print(text, end="")
 
             # If you interrupt the model, it sends a turn_complete.
             # For interruptions to work, we need to stop playback.
@@ -240,7 +276,11 @@ class AudioLoop:
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
-                send_text_task = tg.create_task(self.send_text())
+                # Use CLI loop only if running as script
+                if __name__ == "__main__":
+                    send_text_task = tg.create_task(self.send_text_loop())
+                # For UI, you will call send_text(text) directly from the UI
+
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
                 if self.video_mode == "camera":
@@ -251,13 +291,15 @@ class AudioLoop:
                 tg.create_task(self.receive_audio())
                 tg.create_task(self.play_audio())
 
-                await send_text_task
-                raise asyncio.CancelledError("User requested exit")
+                if __name__ == "__main__":
+                    await send_text_task
+                    raise asyncio.CancelledError("User requested exit")
 
         except asyncio.CancelledError:
             pass
         except ExceptionGroup as EG:
-            self.audio_stream.close()
+            if self.audio_stream is not None:
+                self.audio_stream.close()
             traceback.print_exception(EG)
 
 
