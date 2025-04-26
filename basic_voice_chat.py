@@ -19,6 +19,7 @@ Prerequisites:
     export GEMINI_API_KEY="YOUR_API_KEY"
 
 Usage:
+
     python basic_voice_chat.py
 """
 
@@ -32,6 +33,8 @@ import numpy as np  # type: ignore
 import sounddevice as sd  # type: ignore
 from google import genai
 from google.genai import types
+import sys
+import time
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -41,6 +44,9 @@ API_KEY: Final[str | None] = os.getenv("GEMINI_API_KEY")
 MODEL_NAME: Final[str] = "gemini-2.0-flash-live-001"
 RESPONSE_SAMPLE_RATE: Final[int] = 24000  # Hz, per documentation
 INPUT_SAMPLE_RATE: Final[int] = 16000  # Hz, per documentation
+_CHUNK_MS: Final[int] = 50            # Buffer size in milliseconds (~800 frames)
+_SILENCE_MS: Final[int] = 1200        # Stop after this many ms of silence *after speech started*
+_SILENCE_THRESH: Final[int] = 500     # RMS level (~0–32767) considered "silent"
 
 if not API_KEY:
     raise EnvironmentError(
@@ -53,27 +59,79 @@ client = genai.Client(api_key=API_KEY)
 # Helper functions
 # -----------------------------------------------------------------------------
 
-def record_audio(duration_sec: float = 4.0) -> bytes:
-    """Record audio from the default microphone.
+def _rms_level(data: np.ndarray) -> float:
+    """Compute the root-mean-square (volume) of an int16 NumPy chunk."""
 
-    Input:
-        duration_sec: Desired length of the recording in seconds.
-    Process:
-        • Captures mono audio at 16 kHz, 16-bit using sounddevice.
-    Output:
-        Raw little-endian PCM bytes suitable for Live API.
+    return float(np.sqrt((data.astype(np.int64) ** 2).mean()))
+
+
+def record_audio_vad() -> bytes:
+    """Record audio until *after* the speaker finishes (>=1s silence).
+
+    Input   : None (user presses <Enter> to start recording).
+    Process :
+        1. Capture 50-ms chunks from the default microphone (16-kHz, mono).
+        2. Wait until at least one chunk exceeds the silence threshold –
+           this marks the start of speech.
+        3. Keep recording; once speech has started, stop when we observe
+           `_SILENCE_MS` of consecutive silence.
+    Output  : Raw little-endian 16-bit PCM bytes ready for Gemini.
     """
 
-    print(f"Recording for {duration_sec:.1f}s… Speak now.")
-    frames = sd.rec(
-        int(duration_sec * INPUT_SAMPLE_RATE),
+    print("Press <Enter> to start recording…", end="", flush=True)
+    input()  # Wait for the user to start
+    print("Recording – speak now. (Auto-stop after ~1 s silence)")
+
+    # Storage for chunks while we are recording
+    chunks: list[np.ndarray] = []
+
+    # State for silence detection
+    speech_started = False
+    silence_accum_ms = 0
+
+    blocksize = int(INPUT_SAMPLE_RATE * _CHUNK_MS / 1000)
+
+    def _callback(indata, frames, time_info, status):  # noqa: D401
+        """Stream callback: just add data to our list."""
+
+        if status:
+            print(status, file=sys.stderr)
+        chunks.append(indata.copy())
+
+    with sd.InputStream(
         samplerate=INPUT_SAMPLE_RATE,
         channels=1,
         dtype="int16",
-    )
-    sd.wait()
+        callback=_callback,
+        blocksize=blocksize,
+    ):
+        # The stream runs in the background; we poll length of chunks list.
+        while True:
+            if not chunks:
+                time.sleep(_CHUNK_MS / 1000)  # Wait for first data
+                continue
+
+            # Work on the *latest* chunk only.
+            current_chunk = chunks[-1]
+            rms = _rms_level(current_chunk)
+
+            if rms >= _SILENCE_THRESH:
+                speech_started = True
+                silence_accum_ms = 0  # reset when we hear speech
+            else:
+                if speech_started:
+                    silence_accum_ms += _CHUNK_MS
+                    if silence_accum_ms >= _SILENCE_MS:
+                        break
+
+            # Avoid tight loop
+            time.sleep(_CHUNK_MS / 1000)
+
     print("Recording finished.\n")
-    return frames.flatten().tobytes()
+
+    # Concatenate chunks into a single PCM byte string
+    full_audio = np.concatenate(chunks).flatten()
+    return full_audio.tobytes()
 
 
 def play_audio(pcm_data: bytes) -> None:
@@ -139,7 +197,7 @@ async def chat() -> None:
                 print("Goodbye!")
                 break
 
-            audio_bytes = record_audio()
+            audio_bytes = record_audio_vad()
 
             # Send the recorded audio to Gemini.
             await session.send_realtime_input(
