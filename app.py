@@ -221,9 +221,7 @@ def get_streaming_llm_response(
             # Use .model_dump() for newer Pydantic versions with OpenAI client
             messages.append(response_message.model_dump(exclude_unset=True))
 
-            # AVAILABLE_FUNCTIONS is now globally defined
-            # global AVAILABLE_FUNCTIONS # No longer needed if defined globally above
-
+ 
             tool_results_for_api = [] # Collect results before the next API call
 
             for tool_call in tool_calls:
