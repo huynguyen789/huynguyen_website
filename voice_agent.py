@@ -10,6 +10,9 @@ import threading
 import queue
 import sys
 import time
+import asyncio
+from openai import AsyncOpenAI
+from openai.helpers import LocalAudioPlayer
 
 def record_audio_interactive(sample_rate: int = 44100) -> str:
     """
@@ -65,14 +68,45 @@ def transcribe_audio(file_path: str, client: OpenAI) -> str:
                 model="gpt-4o-transcribe",
                 file=audio_file
             )
-    
+        return transcription.text
     except Exception as e:
         print(f"Error during transcription: {e}")
         raise
 
+def speak_text_streaming(text: str, voice: str = "coral", model: str = "gpt-4o-mini-tts", instructions: str = "Speak in a clear, natural tone.") -> None:
+    """
+    Stream spoken audio from input text directly to speakers using OpenAI TTS.
+
+    Input:
+        text (str): The text to be spoken.
+        voice (str): The voice to use (e.g., "coral").
+        model (str): The TTS model to use.
+        instructions (str): Instructions for the TTS model.
+    Process:
+        Streams audio from OpenAI and plays it in real time.
+    Output:
+        None
+    """
+    async def _speak():
+        openai = AsyncOpenAI()
+        print("Disclosure: The following voice is AI-generated, not a human voice.")
+        async with openai.audio.speech.with_streaming_response.create(
+            model=model,
+            voice=voice,
+            input=text,
+            instructions=instructions,
+            response_format="pcm",  # Fastest for streaming
+        ) as response:
+            await LocalAudioPlayer().play(response)
+    asyncio.run(_speak())
+
 if __name__ == "__main__":
     client = OpenAI()
-    audio_path = record_audio_interactive()   # New interactive
+    audio_path = record_audio_interactive()
     if audio_path:
         text = transcribe_audio(audio_path, client)
         print("Transcription:", text)
+        if text:  # Only speak if transcription is not empty
+            speak_text_streaming(text,instructions="speak softly like a story teller")
+        else:
+            print("No transcription to speak.")
