@@ -751,8 +751,7 @@ def main():
         search_page()
     elif st.session_state.current_page == "Chat":
         chat_page()
-    # elif st.session_state.current_page == "Voice Chat": # Removed
-    #     voice_chat_page() # Removed
+  
 
 if __name__ == "__main__":
     # Crucial: Ensure API keys are loaded from secrets into environment variables
