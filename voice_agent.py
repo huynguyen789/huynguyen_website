@@ -6,33 +6,46 @@ import sounddevice as sd
 from scipy.io.wavfile import write
 import tempfile
 import numpy as np
-import keyboard
 import threading
+import queue
+import sys
 import time
 
-def record_audio(duration: int, sample_rate: int = 44100) -> str:
+def record_audio_interactive(sample_rate: int = 44100) -> str:
     """
-    Record audio from the microphone and save to a temporary WAV file.
-    
+    Record audio from the microphone interactively (press Enter to start/stop) and save to a temporary WAV file.
+
     Input:
-        duration (int): Duration of the recording in seconds.
         sample_rate (int): Sampling rate in Hz.
     Process:
-        Records audio from the default microphone and writes it to a temp WAV file.
+        Waits for user to press Enter to start, records until Enter is pressed again, then saves to temp WAV file.
     Output:
         str: Path to the temporary WAV file.
     """
-    try:
-        print(f"Recording for {duration} seconds...")
-        audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype='int16')
-        sd.wait()
-        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        write(temp_file.name, sample_rate, audio)
-        print(f"Audio recorded and saved to {temp_file.name}")
-        return temp_file.name
-    except Exception as e:
-        print(f"Error during recording: {e}")
-        raise
+    print("Press Enter to start recording...")
+    input()
+    print("Recording... Press Enter to stop.")
+
+    frames = []
+
+    def callback(indata, frames_count, time_info, status):
+        frames.append(indata.copy())
+
+    # Open the stream and record until Enter is pressed again
+    with sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16', callback=callback):
+        input()  # Wait for Enter to stop recording
+
+    print("Recording stopped.")
+
+    if not frames:
+        print("No audio recorded.")
+        return ""
+
+    audio = np.concatenate(frames, axis=0)
+    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    write(temp_file.name, sample_rate, audio)
+    print(f"Audio recorded and saved to {temp_file.name}")
+    return temp_file.name
 
 def transcribe_audio(file_path: str, client: OpenAI) -> str:
     """
@@ -52,53 +65,14 @@ def transcribe_audio(file_path: str, client: OpenAI) -> str:
                 model="gpt-4o-transcribe",
                 file=audio_file
             )
-        return transcription.text
+    
     except Exception as e:
         print(f"Error during transcription: {e}")
         raise
 
-def record_audio_manual(sample_rate: int = 44100) -> str:
-    """
-    Record audio from the microphone, starting and stopping with keyboard input.
-    
-    Input:
-        sample_rate (int): Sampling rate in Hz.
-    Process:
-        Waits for user to press 'r' to start recording and 's' to stop.
-        Records audio from the default microphone and writes it to a temp WAV file.
-    Output:
-        str: Path to the temporary WAV file.
-    """
-    print("Press 'r' to start recording...")
-    keyboard.wait('r')
-    print("Recording... Press 's' to stop.")
-    recording = []
-    is_recording = True
-
-    def record_thread():
-        nonlocal recording, is_recording
-        audio = sd.rec(int(60 * sample_rate), samplerate=sample_rate, channels=1, dtype='int16')
-        while is_recording:
-            time.sleep(0.1)
-        sd.stop()
-        recording = audio[:sd.get_stream().time * sample_rate]
-
-    is_recording = True
-    t = threading.Thread(target=record_thread)
-    t.start()
-    keyboard.wait('s')
-    is_recording = False
-    t.join()
-
-    # Save the recorded audio
-    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    write(temp_file.name, sample_rate, sd.get_stream().read()[0])
-    print(f"Audio recorded and saved to {temp_file.name}")
-    return temp_file.name
-
 if __name__ == "__main__":
     client = OpenAI()
-    # audio_path = record_audio(duration=5)  # Old fixed-duration method
-    audio_path = record_audio_manual()        # New manual control method
-    text = transcribe_audio(audio_path, client)
-    print("Transcription:", text)
+    audio_path = record_audio_interactive()   # New interactive
+    if audio_path:
+        text = transcribe_audio(audio_path, client)
+        print("Transcription:", text)
