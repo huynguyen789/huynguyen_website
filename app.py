@@ -328,7 +328,7 @@ def search_page():
     with col3:
         # Find index safely, default to 0 if not found
         try:
-            default_model_index = MODEL_CONFIG.index("google/gemini-2.0-flash-lite-001")
+            default_model_index = MODEL_CONFIG.index("google/gemini-2.0-flash-001")
         except ValueError:
             default_model_index = 0
         model_choice = st.selectbox(

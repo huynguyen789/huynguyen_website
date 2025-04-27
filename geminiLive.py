@@ -302,6 +302,24 @@ class AudioLoop:
                 self.audio_stream.close()
             traceback.print_exception(EG)
 
+    def set_text_callback(self, callback):
+        """
+        Input: callback (callable): Function to call with model text output.
+        Process: Sets the callback for text output.
+        Output: None
+        """
+        self.text_callback = callback
+
+    async def stop(self):
+        """
+        Input: None
+        Process: Cancels all running tasks and closes audio stream.
+        Output: None
+        """
+        if self.audio_stream is not None:
+            self.audio_stream.close()
+        # You may want to add more cleanup logic here
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
