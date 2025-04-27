@@ -82,7 +82,7 @@ async def speak_text_streaming_async(
     text: str,
     client: AsyncOpenAI,
     voice: str = "alloy", # Changed default voice slightly
-    model: str = "tts-1", # Standard TTS model
+    model: str = "tts-1", # "gpt-4o-mini-tts" or tts-1 Do not change the model! 
     instructions: str = "Speak in a clear, natural tone.",
     player: LocalAudioPlayer = None
 ) -> None:
@@ -136,7 +136,7 @@ async def speak_text_streaming_async(
 def get_llm_response_stream(
     messages: List[Dict[str, str]],
     client: Optional[OpenAI] = None,
-    model_name: str = "gpt-4o" # Default model
+    model_name: str = "gpt-4.1-nano-2025-04-14" # Default model
 ) -> Generator[Tuple[str, str], None, None]:
     """
     Get a streaming response from OpenAI Chat Completion API.
@@ -144,7 +144,7 @@ def get_llm_response_stream(
     Input:
         messages (List[Dict[str, str]]): Conversation history/prompt.
         client (Optional[OpenAI]): Synchronous OpenAI client instance.
-        model_name (str): The model to use (e.g., "gpt-4o", "gpt-3.5-turbo").
+        model_name (str): The model to use (e.g., "gpt-4o"
     Process:
         Sends the messages to the specified OpenAI model and streams the response.
     Output:
@@ -202,13 +202,13 @@ if 'audio_player' not in st.session_state:
 # Config options in sidebar
 with st.sidebar:
     st.header("Configuration")
-    ai_model = st.selectbox("AI Model:", ["gpt-4o", "gpt-3.5-turbo"], key="model_select")
+    ai_model = st.selectbox("AI Model:", ["gpt-4.1-nano-2025-04-14", "gpt-4o"], key="model_select")
     voice_options = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
     tts_voice = st.selectbox("Voice:", voice_options, index=0, key="voice_select")
     auto_speak = st.checkbox("Auto-speak responses", value=True, key="auto_speak")
     system_prompt = st.text_area(
         "System Prompt:", 
-        value="You are a helpful assistant. Respond clearly and concisely to the user's transcribed message.",
+        value="You are a world-class communicator.Prefer concise and direct responses.",
         height=100,
         key="system_prompt_input"
     )
