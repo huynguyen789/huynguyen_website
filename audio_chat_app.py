@@ -208,7 +208,7 @@ with st.sidebar:
     auto_speak = st.checkbox("Auto-speak responses", value=True, key="auto_speak")
     system_prompt = st.text_area(
         "System Prompt:", 
-        value="You are a world-class communicator.Prefer concise and direct responses.",
+        value="You are a world-class communicator. Speak concisely and directly.",
         height=100,
         key="system_prompt_input"
     )

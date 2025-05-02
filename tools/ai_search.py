@@ -31,8 +31,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Internal Helper Functions (Keep previous helpers: _get_openai_client, _get_llm_response, _fetch_serper_results, _fetch_youtube_transcript, _clean_web_content, _fetch_and_clean_website, _gather_content_from_results, _format_content_for_llm, _generate_search_summary) ---
-# Assume all the _helper functions from the previous version are defined here.
-# We will modify _format_content_for_llm slightly and add a new helper.
 
 def _get_openai_client(api_key: str) -> OpenAI:
     """Internal helper to create OpenAI client."""
