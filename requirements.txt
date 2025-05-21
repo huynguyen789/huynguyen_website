@@ -70,3 +70,7 @@ typing-inspection==0.4.0
 tzdata==2025.2
 urllib3==2.4.0
 youtube-transcript-api==1.0.3
+google-genai
+opencv-python
+pyaudio
+mss

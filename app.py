@@ -20,6 +20,9 @@ from newspaper import Article
 import html2text
 from typing import List, Dict, Tuple, Optional, Any, Generator, Union
 import os # Needed for environment variables check in tool (optional)
+import google.genai as genai # Updated import
+from google.genai import types # Added import
+import asyncio # Added import
 
 # --- Import the standalone search module ---
 import tools.ai_search as ai_search
@@ -709,6 +712,161 @@ def chat_page():
          # This case might occur if the selected session ID becomes invalid somehow
          st.warning("Please select a chat session from the sidebar.")
 
+def gemini_live_page():
+    st.title("Gemini Live Interaction 🚀")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        st.error("GEMINI_API_KEY not found in environment variables. Please set it in your Streamlit secrets.")
+        return
+
+    MODEL_NAME = "models/gemini-2.5-flash-preview-native-audio-dialog"
+    LIVE_CONNECT_CONFIG = types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        media_resolution="MEDIA_RESOLUTION_MEDIUM",
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+            )
+        ),
+        context_window_compression=types.ContextWindowCompressionConfig(
+            trigger_tokens=25600,
+            sliding_window=types.SlidingWindow(target_tokens=12800),
+        ),
+    )
+
+    async def _handle_gemini_live_interaction(user_prompt_text):
+        # api_key is already checked and available from the outer scope
+        client = genai.Client(http_options={"api_version": "v1beta"}, api_key=api_key)
+        
+        accumulated_text = ""
+        audio_received_bytes = bytearray()
+        
+        try:
+            async with client.aio.live.connect(model=MODEL_NAME, config=LIVE_CONNECT_CONFIG) as session:
+                await session.send(input=user_prompt_text, end_of_turn=True)
+
+                turn = session.receive()
+                async for response in turn:
+                    if response.text:
+                        accumulated_text += response.text
+                        if st.session_state.gemini_live_messages and st.session_state.gemini_live_messages[-1]["role"] == "assistant":
+                            st.session_state.gemini_live_messages[-1]["content"] = accumulated_text + " ▌"
+                            st.session_state.gemini_live_messages[-1]["is_partial"] = True
+                        else: 
+                            st.session_state.gemini_live_messages.append({
+                                "role": "assistant",
+                                "content": accumulated_text + " ▌",
+                                "is_partial": True
+                            })
+                        st.rerun() # Rerun on each text chunk to update UI
+
+                    if response.data:
+                        audio_received_bytes.extend(response.data)
+            
+            # Finalize the message after stream ends
+            if st.session_state.gemini_live_messages and \
+               st.session_state.gemini_live_messages[-1]["role"] == "assistant" and \
+               st.session_state.gemini_live_messages[-1].get("is_partial"):
+                st.session_state.gemini_live_messages[-1]["content"] = accumulated_text 
+                del st.session_state.gemini_live_messages[-1]["is_partial"]
+            elif accumulated_text and not (st.session_state.gemini_live_messages and st.session_state.gemini_live_messages[-1]["role"] == "assistant"):
+                # This case handles if there was no partial message to update (e.g., text came in one go)
+                st.session_state.gemini_live_messages.append({"role": "assistant", "content": accumulated_text})
+            
+            if audio_received_bytes:
+                st.session_state.last_audio_bytes = bytes(audio_received_bytes)
+                st.session_state.gemini_live_messages.append({"role": "assistant", "content": f"[Audio response generated ({len(audio_received_bytes)} bytes). See player below.]"})
+            
+            if not accumulated_text and not audio_received_bytes:
+                 st.session_state.gemini_live_messages.append({"role": "assistant", "content": "No text or audio response was received from the model."})
+
+        except Exception as e:
+            logger.error(f"Error in _handle_gemini_live_interaction: {str(e)}", exc_info=True) # Added line
+            error_message = f"Error during Gemini Live interaction: {str(e)}"
+            st.error(error_message) 
+            # Update the last partial message with the error, or add a new error message
+            if st.session_state.gemini_live_messages and \
+               st.session_state.gemini_live_messages[-1]["role"] == "assistant" and \
+               st.session_state.gemini_live_messages[-1].get("is_partial"):
+                 st.session_state.gemini_live_messages[-1]["content"] = error_message
+                 if "is_partial" in st.session_state.gemini_live_messages[-1]:
+                    del st.session_state.gemini_live_messages[-1]["is_partial"]
+            else:
+                st.session_state.gemini_live_messages.append({"role": "assistant", "content": error_message})
+        
+        st.rerun() # Rerun once after the interaction is fully processed or an error occurred
+
+    # Session State Initialization
+    if 'gemini_live_messages' not in st.session_state:
+        st.session_state.gemini_live_messages = [{"role": "assistant", "content": "Hi! I'm ready for a live session. Send a message to begin."}]
+    if 'new_prompt_to_process' not in st.session_state: 
+        st.session_state.new_prompt_to_process = None
+    if 'last_audio_bytes' not in st.session_state: # To store received audio
+        st.session_state.last_audio_bytes = None
+    if 'gemini_live_mode' not in st.session_state:
+        st.session_state.gemini_live_mode = "Text Only / Voice" # Default mode
+
+    # Mode Selection Radio Buttons in Sidebar
+    st.sidebar.subheader("Interaction Mode")
+    modes = ["Text Only / Voice", "Camera", "Screen"]
+    selected_mode = st.sidebar.radio(
+        "Choose interaction mode:",
+        modes,
+        key='gemini_live_mode_radio', # Use the session state key directly or update it
+        index=modes.index(st.session_state.gemini_live_mode) # Set index based on session state
+    )
+
+    # Update session state if selection changes
+    if selected_mode != st.session_state.gemini_live_mode:
+        st.session_state.gemini_live_mode = selected_mode
+        st.rerun() # Rerun to reflect mode change or any UI differences
+
+    # Display info about placeholder modes
+    if st.session_state.gemini_live_mode != "Text Only / Voice":
+        st.warning(f"'{st.session_state.gemini_live_mode}' mode is not yet implemented. Using 'Text Only / Voice' functionality.")
+    else:
+        st.info("Currently in 'Text Only / Voice' mode.")
+
+    st.markdown("---") # Separator
+
+    # Display Messages
+    for message in st.session_state.gemini_live_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"]) 
+
+    # Chat Input Logic
+    if prompt := st.chat_input("Your message to Gemini..."):
+        st.session_state.gemini_live_messages.append({"role": "user", "content": prompt})
+        st.session_state.new_prompt_to_process = prompt 
+        st.rerun() # Rerun to display user message and then process it
+
+    # Trigger Async Interaction
+    if st.session_state.new_prompt_to_process:
+        current_prompt = st.session_state.new_prompt_to_process
+        st.session_state.new_prompt_to_process = None # Clear the flag
+
+        # Add initial "Thinking..." message if not already added by the async handler's first chunk
+        if not (st.session_state.gemini_live_messages and \
+                st.session_state.gemini_live_messages[-1]["role"] == "assistant" and \
+                st.session_state.gemini_live_messages[-1].get("is_partial")):
+            st.session_state.gemini_live_messages.append({"role": "assistant", "content": "Thinking... ▌", "is_partial": True})
+        
+        asyncio.run(_handle_gemini_live_interaction(current_prompt))
+        # No st.rerun() here, as _handle_gemini_live_interaction will call it
+
+    # Audio Playback Section (after interaction might have populated last_audio_bytes)
+    if hasattr(st.session_state, 'last_audio_bytes') and st.session_state.last_audio_bytes:
+        st.markdown("---") # Add a separator
+        st.markdown("#### 🔊 Assistant's Voice Response:")
+        try:
+            st.audio(st.session_state.last_audio_bytes, sample_rate=24000) 
+            st.toast("Playing audio response...")
+        except Exception as e:
+            st.error(f"Error playing audio: {e}")
+        finally:
+            # Clear the audio bytes after attempting to play to prevent auto-replay on next rerun
+            st.session_state.last_audio_bytes = None
 
 # --- Main Application ---
 
@@ -723,7 +881,7 @@ def main():
         st.markdown("---") # Separator before navigation
         st.title("Navigation")
         # Use st.session_state.current_page to set the default selected radio button
-        pages = ["Home", "Search", "Chat"] # Removed "Voice Chat"
+        pages = ["Home", "Search", "Chat", "Gemini Live"] 
         try:
             current_page_index = pages.index(st.session_state.current_page)
         except ValueError:
@@ -751,6 +909,8 @@ def main():
         search_page()
     elif st.session_state.current_page == "Chat":
         chat_page()
+    elif st.session_state.current_page == "Gemini Live": # New condition
+        gemini_live_page() # Call the new function
     # elif st.session_state.current_page == "Voice Chat": # Removed
     #     voice_chat_page() # Removed
 
@@ -764,8 +924,8 @@ if __name__ == "__main__":
         os.environ["SERPER_API_KEY"] = st.secrets["SERPER_API_KEY"]
     if "OPENROUTER_API_KEY" in st.secrets:
         os.environ["OPENROUTER_API_KEY"] = st.secrets["OPENROUTER_API_KEY"]
-    # Also load GEMINI_API_KEY for the Voice Chat page # Removed
-    # if "GEMINI_API_KEY" in st.secrets: # Removed
-    #     os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"] # Removed
+    # Also load GEMINI_API_KEY for the Voice Chat page
+    if "GEMINI_API_KEY" in st.secrets:
+        os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
 
     main()
