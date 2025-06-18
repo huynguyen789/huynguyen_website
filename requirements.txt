@@ -5,3 +5,4 @@ youtube-transcript-api
 openai
 newspaper3k
 html2text
+lxml[html_clean]
