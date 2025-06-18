@@ -50,9 +50,9 @@ MODEL_CONFIG = [
     "openai/gpt-4.1",
     "openai/o3",
     "openai/o4-mini-high",
-    "anthropic/claude-4-sonnet",
+    "anthropic/claude-sonnet-4",
     "google/gemini-2.5-pro",
-    "google/gemini-2.5-flash-lite",
+    "google/gemini-2.5-flash-lite-preview-06-17",
     "google/gemini-2.5-flash",
     "x-ai/grok-3-beta",
     "x-ai/grok-3-mini-beta"
