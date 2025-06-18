@@ -27,6 +27,7 @@ import tools.ai_search as ai_search
 # from voice_chat import voice_chat_page # Removed
 # --- Import Tool Functions ---
 from tools.tools import get_current_time, perform_web_search # Updated import
+from tools.get_youtube_transcript import get_youtube_transcript_with_fallback # Updated import
 
 # --- Configuration ---
 
@@ -709,6 +710,198 @@ def chat_page():
          # This case might occur if the selected session ID becomes invalid somehow
          st.warning("Please select a chat session from the sidebar.")
 
+def youtube_summary_page():
+    """ Renders the YouTube Summary page UI and handles video summarization. """
+    st.title("YouTube Video Summarizer 📺")
+    st.write("Get AI-generated summaries of YouTube videos using their transcripts.")
+
+    # Check for required API key
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        st.error("🚨 Configuration Error: `OPENROUTER_API_KEY` environment variable is not set.")
+        st.warning("Please ensure this is set in your environment or Streamlit secrets.")
+        st.stop()
+
+    # Initialize session state for YouTube summary page
+    if 'youtube_history' not in st.session_state:
+        st.session_state.youtube_history = []
+
+    # Default system prompt
+    default_system_prompt = """You are an expert video content summarizer. Create a comprehensive yet concise summary of the YouTube video transcript provided. 
+
+Format your response with:
+- A brief overview (2-3 sentences)
+- Key points covered (bullet points)
+- Important details or insights
+- Main takeaways
+
+Keep the summary informative but readable."""
+
+    # --- Input Section ---
+    st.subheader("📝 Video Summary Settings")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        youtube_url = st.text_input(
+            "🔗 YouTube URL:",
+            placeholder="https://www.youtube.com/watch?v=...",
+            key="youtube_url_input"
+        )
+    
+    with col2:
+        summarize_button = st.button("🔄 Summarize Video", use_container_width=True, key="summarize_button")
+
+    # Custom system prompt
+    custom_system_prompt = st.text_area(
+        "🎯 Custom Summary Instructions (optional):",
+        value=default_system_prompt,
+        height=120,
+        help="Customize how you want the video to be summarized. Leave as default or modify as needed.",
+        key="custom_system_prompt"
+    )
+
+    # --- Processing and Results ---
+    if summarize_button and youtube_url:
+        try:
+            with st.spinner("Fetching video transcript..."):
+                # Import the fallback function
+                from tools.get_youtube_transcript import get_youtube_transcript_with_fallback
+                
+                # Use the fallback function with debugging enabled
+                transcript, status = get_youtube_transcript_with_fallback(youtube_url, debug=True)
+                
+                if status != "success":
+                    st.error(f"❌ {status}")
+                    
+                    # Add debugging info
+                    with st.expander("🔍 Debug Information", expanded=False):
+                        st.write("If this video works in the standalone script but not here, try:")
+                        st.write("1. Check if the video is the same one you tested")
+                        st.write("2. Try a different video (like a popular TED talk)")
+                        st.write("3. The issue might be YouTube treating web apps differently")
+                        st.code(f"Video URL: {youtube_url}")
+                        st.code(f"Error: {status}")
+                    
+                    return
+
+            # Trim transcript to context limit (120k characters)
+            max_context_length = 120000
+            if len(transcript) > max_context_length:
+                transcript = transcript[:max_context_length]
+                st.warning(f"⚠️ Transcript was truncated to {max_context_length:,} characters to fit context limits.")
+
+            # Prepare messages for LLM
+            system_prompt = custom_system_prompt.strip() if custom_system_prompt.strip() else default_system_prompt
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Here is the YouTube video transcript:\n\n{transcript}\n\nPlease provide a comprehensive summary following the instructions given."}
+            ]
+
+            # Generate streaming summary
+            st.subheader("📊 Video Summary")
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_summary = ""
+
+                try:
+                    # Use streaming response
+                    response_generator = get_streaming_llm_response(
+                        messages=messages,
+                        model_name="google/gemini-2.5-flash",
+                        tools=None  # No tools needed for summarization
+                    )
+
+                    for chunk, current_response_or_signal in response_generator:
+                        # Handle signals (though we don't expect tool calls)
+                        if isinstance(current_response_or_signal, str) and current_response_or_signal.startswith(("tool_", "error:")):
+                            continue  # Skip tool signals for this use case
+                        else:
+                            # It's content, update the placeholder
+                            full_summary = current_response_or_signal
+                            message_placeholder.markdown(full_summary + "▌")
+
+                    # Final display without cursor
+                    message_placeholder.markdown(full_summary)
+
+                    # Store in history
+                    history_entry = {
+                        "url": youtube_url,
+                        "custom_prompt": system_prompt,
+                        "summary": full_summary,
+                        "transcript": transcript,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    st.session_state.youtube_history.append(history_entry)
+
+                    # Show full transcript in expandable section
+                    with st.expander("📜 Full Transcript (click to show)", expanded=False):
+                        st.text_area(
+                            "Video Transcript:",
+                            value=transcript,
+                            height=400,
+                            key=f"transcript_display_{len(st.session_state.youtube_history)}"
+                        )
+
+                except Exception as e:
+                    error_msg = f"Error generating summary: {str(e)}"
+                    message_placeholder.error(error_msg)
+                    logger.error(f"YouTube summary error: {e}", exc_info=True)
+
+        except Exception as e:
+            st.error(f"❌ Error processing video: {str(e)}")
+            logger.error(f"YouTube processing error: {e}", exc_info=True)
+
+    # --- History Section ---
+    if st.session_state.youtube_history:
+        st.markdown("---")
+        st.subheader("📚 Summary History")
+        st.write(f"**{len(st.session_state.youtube_history)} video(s) summarized**")
+        
+        # Display history items (newest first)
+        for i, entry in enumerate(reversed(st.session_state.youtube_history)):
+            history_index = len(st.session_state.youtube_history) - 1 - i
+            
+            # Use a container instead of nested expanders
+            with st.container(border=True):
+                st.markdown(f"**Summary #{i+1} - {entry['timestamp']}**")
+                st.markdown(f"🔗 [{entry['url']}]({entry['url']})")
+                
+                # Show summary directly
+                st.markdown("**Summary:**")
+                st.markdown(entry['summary'])
+                
+                # Use columns for transcript access
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write("📜 **Transcript Available**")
+                with col2:
+                    # Use a button to show/hide transcript
+                    show_transcript_key = f"show_transcript_{history_index}"
+                    if show_transcript_key not in st.session_state:
+                        st.session_state[show_transcript_key] = False
+                    
+                    if st.button(
+                        "Show Transcript" if not st.session_state[show_transcript_key] else "Hide Transcript",
+                        key=f"transcript_toggle_{history_index}"
+                    ):
+                        st.session_state[show_transcript_key] = not st.session_state[show_transcript_key]
+                
+                # Show transcript if toggled
+                if st.session_state.get(show_transcript_key, False):
+                    st.text_area(
+                        "Transcript:",
+                        value=entry['transcript'],
+                        height=300,
+                        key=f"history_transcript_{history_index}"
+                    )
+
+        # Clear history button
+        if st.button("🗑️ Clear History", key="clear_youtube_history"):
+            # Also clear all transcript toggle states
+            keys_to_remove = [key for key in st.session_state.keys() if key.startswith("show_transcript_")]
+            for key in keys_to_remove:
+                del st.session_state[key]
+            st.session_state.youtube_history = []
+            st.rerun()
 
 # --- Main Application ---
 
@@ -723,7 +916,7 @@ def main():
         st.markdown("---") # Separator before navigation
         st.title("Navigation")
         # Use st.session_state.current_page to set the default selected radio button
-        pages = ["Home", "Search", "Chat"] # Removed "Voice Chat"
+        pages = ["Home", "Search", "Chat", "YouTube Summary"] # Added YouTube Summary
         try:
             current_page_index = pages.index(st.session_state.current_page)
         except ValueError:
@@ -751,8 +944,8 @@ def main():
         search_page()
     elif st.session_state.current_page == "Chat":
         chat_page()
-    # elif st.session_state.current_page == "Voice Chat": # Removed
-    #     voice_chat_page() # Removed
+    elif st.session_state.current_page == "YouTube Summary": # Added YouTube Summary page
+        youtube_summary_page()
 
 if __name__ == "__main__":
     # Crucial: Ensure API keys are loaded from secrets into environment variables
