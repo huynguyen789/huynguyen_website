@@ -16,6 +16,7 @@ from typing import Dict, Any # Keep for return type annotation
 #perform_web_search
 import os # Moved import inside
 from typing import Dict, Any # Moved import inside
+from config import get_app_default_model
 
 
 # Note: Logger configuration remains global
@@ -67,7 +68,7 @@ def perform_web_search(query: str):
         logger.info(f"Tool 'perform_web_search' executing ai_search.search for query: '{query}'")
         search_result = ai_search.search(
             query=query,
-            model="google/gemini-2.0-flash-001",
+            model=get_app_default_model("chat_web_search"),
             search_depth="fast",
             include_youtube=True
         )

@@ -23,6 +23,8 @@ import os
 # Import Dict and Any for type hinting the return value
 from typing import List, Dict, Tuple, Optional, Any, Union
 
+from config import get_app_default_model
+
 # --- Configuration ---
 logging.basicConfig(
     level=logging.WARNING,
@@ -332,7 +334,7 @@ If you done a great job, you will get a 100k bonus this year. If not a cat will 
 
 def search(
     query: str,
-    model: str = "google/gemini-2.0-flash-001",
+    model: Optional[str] = None,
     search_depth: str = "fast",
     include_youtube: bool = True
 ) -> Dict[str, Any]:
@@ -347,7 +349,7 @@ def search(
     Args:
         query: The user's search query.
         model: The OpenRouter model identifier for summarization
-               (default: "google/gemini-2.0-flash-001").
+               (default: search app default from config.py).
         search_depth: "fast" (approx 5 sources) or "deep" (approx 10 sources)
                       (default: "fast").
         include_youtube: Whether to include YouTube transcripts (default: True).
@@ -363,6 +365,9 @@ def search(
         - 'access_stats' (Dict | None): Statistics about content gathering, or None.
         - 'error_message' (str | None): Specific error message if status is 'error'.
     """
+    if model is None:
+        model = get_app_default_model("search")
+
     logger.info(f"Starting search for query: '{query}'")
     logger.info(f"Parameters: model={model}, depth={search_depth}, youtube={include_youtube}")
 

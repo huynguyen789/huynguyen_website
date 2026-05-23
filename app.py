@@ -20,6 +20,22 @@ from newspaper import Article
 import html2text
 from typing import List, Dict, Tuple, Optional, Any, Generator, Union
 import os # Needed for environment variables check in tool (optional)
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from config import (
+    NAV_PAGES,
+    PAGE_ICON,
+    PAGE_LAYOUT,
+    PAGE_TITLE,
+    PROFILE_IMAGE,
+    PROFILE_INFO,
+    SITE_PASSWORD_KEY,
+    get_app_default_model,
+    get_app_model_options,
+    get_model_select_index,
+)
 
 # --- Import the standalone search module ---
 import tools.ai_search as ai_search
@@ -40,23 +56,85 @@ logger = logging.getLogger(__name__) # Logger for app.py
 
 # Page configuration
 st.set_page_config(
-    page_title="Huy Nguyen Portfolio",
-    page_icon="👨‍💻",
-    layout="wide"
+    page_title=PAGE_TITLE,
+    page_icon=PAGE_ICON,
+    layout=PAGE_LAYOUT,
 )
 
-# Model configuration
-MODEL_CONFIG = [
-    "openai/gpt-4.1",
-    "openai/o3",
-    "openai/o4-mini-high",
-    "anthropic/claude-sonnet-4",
-    "google/gemini-2.5-pro",
-    "google/gemini-2.5-flash-lite-preview-06-17",
-    "google/gemini-2.5-flash",
-    "x-ai/grok-3-beta",
-    "x-ai/grok-3-mini-beta"
-]
+
+def get_site_password() -> Optional[str]:
+    """
+    Input: None
+    Process: Reads SITE_PASSWORD from Streamlit secrets (deploy) or environment (.env local).
+    Output: Password string, or None if not configured.
+    """
+    try:
+        if SITE_PASSWORD_KEY in st.secrets:
+            return st.secrets[SITE_PASSWORD_KEY]
+    except Exception:
+        pass
+    return os.environ.get(SITE_PASSWORD_KEY)
+
+
+def require_auth() -> None:
+    """
+    Input: None
+    Process: Blocks the app until the user enters the correct site password.
+    Output: None — calls st.stop() if not authenticated.
+    """
+    if st.session_state.get("authenticated"):
+        return
+
+    site_password = get_site_password()
+    if not site_password:
+        st.error("SITE_PASSWORD is not set. Add it to `.env` locally or Streamlit secrets when deployed.")
+        st.stop()
+
+    st.title("Huy Nguyen")
+    st.caption("Enter password to continue.")
+    entered = st.text_input("Password", type="password", key="site_password_input")
+    if st.button("Enter", type="primary"):
+        if entered == site_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Wrong password.")
+    st.stop()
+
+
+def inject_portfolio_styles():
+    """
+    Input: None
+    Process: Injects minimal CSS for the sidebar profile photo only.
+    Output: None (renders CSS into the Streamlit page).
+    """
+    st.markdown(
+        """
+        <style>
+        .sidebar-profile [data-testid="stImage"] img {
+            border-radius: 50%;
+            aspect-ratio: 1;
+            object-fit: cover;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_profile():
+    """
+    Input: None
+    Process: Renders a compact sidebar identity block with a small profile photo.
+    Output: None (renders sidebar UI).
+    """
+    st.markdown('<div class="sidebar-profile">', unsafe_allow_html=True)
+    if os.path.exists(PROFILE_IMAGE):
+        st.image(PROFILE_IMAGE, width=72)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(f"**{PROFILE_INFO['name']}**")
+    st.caption("AI Engineer · Florida")
+    st.markdown("---")
 
 # --- AI Interaction Modules ---
 
@@ -279,16 +357,31 @@ def get_streaming_llm_response(
 # --- UI Page Modules ---
 
 def home_page():
-    """ Renders the Home page content. """
-    st.markdown("## Welcome to My Portfolio!")
-    st.markdown("""
-    I am a passionate developer exploring the intersection of AI, web technologies, and data.
-    This site showcases some experimental tools built with Streamlit and various APIs.
+    """ Renders the Home page — plain text, no decorative UI chrome. """
+    st.markdown(f"# {PROFILE_INFO['name']}")
+    st.markdown(PROFILE_INFO["tagline"])
 
-    Navigate using the sidebar to explore:
-    - **Search:** An AI-powered search assistant that synthesizes information from multiple web and YouTube sources.
-    - **Chat:** A conversational AI interface using different language models, capable of using tools like web search.
-    """)
+    st.markdown("---")
+    st.subheader("About")
+    for paragraph in PROFILE_INFO["about"]:
+        st.write(paragraph)
+
+    work = PROFILE_INFO["featured_work"]
+    st.markdown("---")
+    st.subheader("Work")
+    st.markdown(f"**{work['title']}** · {work['org']} · {work['period']}")
+    st.write(work["summary"])
+    for detail in work["details"]:
+        st.markdown(f"- {detail}")
+
+    st.markdown("---")
+    st.subheader("This site")
+    for name, description in PROFILE_INFO["site_tools"]:
+        st.markdown(f"**{name}** — {description}")
+
+    if PROFILE_INFO.get("linkedin_url"):
+        st.markdown("---")
+        st.link_button("LinkedIn", PROFILE_INFO["linkedin_url"])
 
 def search_page():
     """ Renders the Search page UI and handles search logic using ai_search module. """
@@ -326,14 +419,10 @@ def search_page():
     col3, col4, col5 = st.columns([2, 2, 1])
     with col3:
         # Find index safely, default to 0 if not found
-        try:
-            default_model_index = MODEL_CONFIG.index("google/gemini-2.0-flash-001")
-        except ValueError:
-            default_model_index = 0
         model_choice = st.selectbox(
             "AI Model for Summarization:",
-            MODEL_CONFIG,
-            index=default_model_index,
+            get_app_model_options("search"),
+            index=get_model_select_index("search"),
             key="search_model_select",
             help="Select the AI model to generate the summary."
         )
@@ -536,13 +625,9 @@ def chat_page():
         st.session_state.chat_session_counter += 1
         new_session_id = f"session_{st.session_state.chat_session_counter}"
         # Find a default model index safely
-        try:
-            default_model_index = MODEL_CONFIG.index("google/gemini-2.5-flash-preview")
-        except ValueError:
-            default_model_index = 0 # Fallback to the first model
         st.session_state.chat_sessions[new_session_id] = {
             "history": [{"role": "assistant", "content": "👋 Hi! How can I help you today? I can also perform web searches if needed."}],
-            "model": MODEL_CONFIG[default_model_index]
+            "model": get_app_default_model("chat"),
         }
         st.session_state.current_chat_session_id = new_session_id
         st.rerun()
@@ -585,20 +670,16 @@ def chat_page():
         chat_history = current_session["history"]
 
         # Model selection for the current chat
+        chat_models = get_app_model_options("chat")
         try:
-            current_model_index = MODEL_CONFIG.index(current_session["model"])
+            current_model_index = chat_models.index(current_session["model"])
         except ValueError:
-            # Fallback if model name is somehow invalid
-            try:
-                current_model_index = MODEL_CONFIG.index("google/gemini-2.5-flash-preview")
-            except ValueError:
-                current_model_index = 0 # Absolute fallback
-            current_session["model"] = MODEL_CONFIG[current_model_index] # Correct the stored model name
-
+            current_session["model"] = get_app_default_model("chat")
+            current_model_index = get_model_select_index("chat")
 
         selected_model = st.selectbox(
             "Select Model for this Chat:",
-            MODEL_CONFIG,
+            chat_models,
             index=current_model_index,
             key=f"model_select_{st.session_state.current_chat_session_id}" # Key specific to session
         )
@@ -737,15 +818,23 @@ Keep the summary informative but readable."""
     # --- Input Section ---
     st.subheader("📝 Video Summary Settings")
     
-    col1, col2 = st.columns([2, 1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
         youtube_url = st.text_input(
             "🔗 YouTube URL:",
             placeholder="https://www.youtube.com/watch?v=...",
             key="youtube_url_input"
         )
-    
+
     with col2:
+        youtube_model = st.selectbox(
+            "AI Model:",
+            get_app_model_options("youtube"),
+            index=get_model_select_index("youtube"),
+            key="youtube_model_select",
+        )
+
+    with col3:
         summarize_button = st.button("🔄 Summarize Video", use_container_width=True, key="summarize_button")
 
     # Custom system prompt
@@ -804,7 +893,7 @@ Keep the summary informative but readable."""
                     # Use streaming response
                     response_generator = get_streaming_llm_response(
                         messages=messages,
-                        model_name="google/gemini-2.5-flash",
+                        model_name=youtube_model,
                         tools=None  # No tools needed for summarization
                     )
 
@@ -905,16 +994,21 @@ Keep the summary informative but readable."""
 
 def main():
     """ Main function to run the Streamlit application and handle navigation. """
+    inject_portfolio_styles()
+
     # Initialize session state for navigation if it doesn't exist
     if 'current_page' not in st.session_state:
         st.session_state.current_page = 'Home' # Default page
 
     # Sidebar for navigation
     with st.sidebar:
-        st.markdown("---") # Separator before navigation
+        render_sidebar_profile()
+        if st.button("Log out", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
         st.title("Navigation")
         # Use st.session_state.current_page to set the default selected radio button
-        pages = ["Home", "Search", "Chat", "YouTube Summary"] # Added YouTube Summary
+        pages = NAV_PAGES
         try:
             current_page_index = pages.index(st.session_state.current_page)
         except ValueError:
@@ -955,8 +1049,6 @@ if __name__ == "__main__":
         os.environ["SERPER_API_KEY"] = st.secrets["SERPER_API_KEY"]
     if "OPENROUTER_API_KEY" in st.secrets:
         os.environ["OPENROUTER_API_KEY"] = st.secrets["OPENROUTER_API_KEY"]
-    # Also load GEMINI_API_KEY for the Voice Chat page # Removed
-    # if "GEMINI_API_KEY" in st.secrets: # Removed
-    #     os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"] # Removed
 
+    require_auth()
     main()

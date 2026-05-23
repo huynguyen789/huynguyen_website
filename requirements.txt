@@ -1,4 +1,5 @@
 streamlit
+python-dotenv
 requests
 beautifulsoup4
 youtube-transcript-api
