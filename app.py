@@ -383,6 +383,54 @@ def home_page():
         st.markdown("---")
         st.link_button("LinkedIn", PROFILE_INFO["linkedin_url"])
 
+def render_search_follow_up(search_data: Dict[str, Any], selected_index: int) -> None:
+    """
+    Input: Selected search history entry and its index.
+    Process: Renders follow-up Q&A UI using the original search context.
+    Output: None (updates session state when a follow-up is answered).
+    """
+    if search_data.get("status") not in ("success", "no_content"):
+        return
+    if not search_data.get("summary") and not search_data.get("combined_raw_text"):
+        return
+
+    st.markdown("---")
+    st.subheader("Follow-up")
+    st.caption("Ask about these results. Uses the same sources — no new web search.")
+
+    if "follow_ups" not in search_data:
+        search_data["follow_ups"] = []
+
+    for message in search_data["follow_ups"]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    follow_up_question = st.chat_input(
+        "Ask a follow-up question...",
+        key=f"search_follow_up_input_{selected_index}",
+    )
+    if not follow_up_question:
+        return
+
+    prior_turns = search_data["follow_ups"]
+    with st.spinner("Answering follow-up..."):
+        answer = ai_search.follow_up(
+            question=follow_up_question,
+            original_query=search_data["query"],
+            summary=search_data.get("summary") or "",
+            combined_raw_text=search_data.get("combined_raw_text") or "",
+            conversation=prior_turns,
+            model=search_data.get("model_used"),
+        )
+
+    search_data["follow_ups"] = prior_turns + [
+        {"role": "user", "content": follow_up_question},
+        {"role": "assistant", "content": answer},
+    ]
+    st.session_state.search_history[selected_index] = search_data
+    st.rerun()
+
+
 def search_page():
     """ Renders the Search page UI and handles search logic using ai_search module. """
     st.title("AI-Powered Search Assistant 🔍")
@@ -463,6 +511,7 @@ def search_page():
                 "search_depth": search_depth_val,
                 "included_youtube": st.session_state.include_youtube,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "follow_ups": [],
                 **search_results_data # Unpack the results dict from ai_search.search
             }
             st.session_state.search_history.append(history_entry)
@@ -569,6 +618,8 @@ def search_page():
                          with tabs[tab_index]:
                              tab_index += 1
                              st.json(serper_results)
+
+                    render_search_follow_up(search_data, selected_index)
 
                 # Button to clear the displayed result area
                 if st.button("Clear Displayed Result", key=f"clear_search_{selected_index}"):

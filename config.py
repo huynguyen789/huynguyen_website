@@ -123,3 +123,15 @@ def get_model_select_index(app: str, model: str | None = None) -> int:
         return options.index(target)
     except ValueError:
         return 0
+
+# --- Search scraping ---
+# Domains that usually block scrapers — skipped to save time; Serper snippet used instead.
+SEARCH_SKIP_DOMAINS = {
+    "wsj.com",
+    "reuters.com",
+    "bloomberg.com",
+    "ft.com",
+    "nytimes.com",
+    "economist.com",
+    "barrons.com",
+}

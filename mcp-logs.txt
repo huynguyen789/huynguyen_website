@@ -10,3 +10,4 @@
 {"level":30,"time":"2026-05-23T19:33:48.975Z","pid":51043,"hostname":"Bim-MacBook-Pro-M1-16.local","msg":"MCP Server setup complete. Waiting for requests from client..."}
 {"level":30,"time":"2026-05-23T19:33:48.975Z","pid":51043,"hostname":"Bim-MacBook-Pro-M1-16.local","msg":"MCP Server started and listening."}
 {"level":30,"time":"2026-05-23T19:33:48.975Z","pid":51043,"hostname":"Bim-MacBook-Pro-M1-16.local","msg":"Application setup complete. Running..."}
+{"level":30,"time":"2026-05-23T19:59:07.862Z","pid":51043,"hostname":"Bim-MacBook-Pro-M1-16.local","msg":"Received SIGTERM. Shutting down gracefully..."}

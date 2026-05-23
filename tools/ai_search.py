@@ -23,16 +23,45 @@ import os
 # Import Dict and Any for type hinting the return value
 from typing import List, Dict, Tuple, Optional, Any, Union
 
-from config import get_app_default_model
+from urllib.parse import urlparse, urlunparse
 
-# --- Configuration ---
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+from config import get_app_default_model, SEARCH_SKIP_DOMAINS
+
 logger = logging.getLogger(__name__)
 
 # --- Internal Helper Functions (Keep previous helpers: _get_openai_client, _get_llm_response, _fetch_serper_results, _fetch_youtube_transcript, _clean_web_content, _fetch_and_clean_website, _gather_content_from_results, _format_content_for_llm, _generate_search_summary) ---
+
+def _normalize_url(url: str) -> str:
+    """
+    Input: Raw URL string from search results.
+    Process: Normalizes host/path so duplicate variants dedupe correctly.
+    Output: Normalized URL key.
+    """
+    parsed = urlparse(url.strip())
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+
+
+def _domain_from_url(url: str) -> str:
+    """Input: URL. Process: Extract bare domain. Output: Domain string."""
+    netloc = urlparse(url).netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc
+
+
+def _should_skip_domain(url: str) -> bool:
+    """
+    Input: URL to fetch.
+    Process: Checks if domain is on the skip list (paywalls / bot blockers).
+    Output: True if fetch should be skipped.
+    """
+    domain = _domain_from_url(url)
+    return any(domain == skip or domain.endswith(f".{skip}") for skip in SEARCH_SKIP_DOMAINS)
+
 
 def _get_openai_client(api_key: str) -> OpenAI:
     """Internal helper to create OpenAI client."""
@@ -50,15 +79,28 @@ def _get_llm_response(
     system_prompt: Optional[str] = None,
     client: Optional[OpenAI] = None
 ) -> str:
-    """Internal helper to get LLM response."""
+    """Internal helper to get LLM response from a single user prompt."""
+    messages = [{"role": "user", "content": prompt}]
+    if system_prompt:
+        messages.insert(0, {"role": "system", "content": system_prompt})
+    return _get_llm_chat_response(messages, model_name, api_key, client)
+
+
+def _get_llm_chat_response(
+    messages: List[Dict[str, str]],
+    model_name: str,
+    api_key: str,
+    client: Optional[OpenAI] = None
+) -> str:
+    """
+    Input: Chat messages, model slug, API key, optional OpenAI client.
+    Process: Sends messages to OpenRouter and returns the assistant reply.
+    Output: Assistant response text.
+    """
     if client is None:
         client = _get_openai_client(api_key)
 
     try:
-        messages = [{"role": "user", "content": prompt}]
-        if system_prompt:
-            messages.insert(0, {"role": "system", "content": system_prompt})
-
         completion = client.chat.completions.create(
             model=model_name,
             messages=messages
@@ -118,7 +160,7 @@ def _clean_web_content(html_content: str, url: str) -> str:
     min_content_length_newspaper = 200
     min_content_length_fallback = 100
     try: # Wrap newspaper in try-except
-        article = Article(url)
+        article = Article("", language="en")
         article.set_html(html_content)
         article.parse()
         if article.text and len(article.text.strip()) >= min_content_length_newspaper:
@@ -194,10 +236,16 @@ def _gather_content_from_results(
         total_successful = successful_website_count + successful_youtube_count
         if total_successful >= target_sources: logger.info(f"Reached target source count ({target_sources})."); break
         url = result.get('link'); title = result.get('title', 'Untitled')
-        if not url or url in processed_urls: continue
-        processed_urls.add(url); total_attempted += 1
+        if not url:
+            continue
+        normalized_url = _normalize_url(url)
+        if normalized_url in processed_urls:
+            continue
+        processed_urls.add(normalized_url)
+        total_attempted += 1
         logger.info(f"Attempt {total_attempted}/{max_attempts}: Processing URL {i+1}/{len(organic_results)}: {url}")
         is_youtube = 'youtube.com/watch?v=' in url or 'youtu.be/' in url
+        snippet = (result.get("snippet") or "").strip()
         try:
             if is_youtube and include_youtube:
                 logger.info(f"-> Processing as YouTube video...")
@@ -206,9 +254,22 @@ def _gather_content_from_results(
                 else: logger.warning(f"  [FAILED] Could not get transcript for {url}"); failed_youtube_urls.append(url); failed_youtube_count += 1
             elif not is_youtube:
                 logger.info(f"-> Processing as website...")
-                content = _fetch_and_clean_website(url)
-                if content: logger.info(f"  [SUCCESS] Fetched and cleaned content for {url}"); website_contents.append({'title': title, 'link': url, 'content': content}); successful_website_count += 1
-                else: logger.warning(f"  [FAILED/BLOCKED] Could not get content for {url}"); blocked_urls.append(url); blocked_website_count += 1
+                content = None
+                if _should_skip_domain(url):
+                    logger.info(f"  [SKIP] Known blocked domain, using Serper snippet for {url}")
+                else:
+                    content = _fetch_and_clean_website(url)
+                if not content and snippet:
+                    content = f"{snippet}\n\n[Source: Serper search snippet — full page was not accessible]"
+                    logger.info(f"  [SNIPPET] Using Serper snippet for {url}")
+                if content:
+                    logger.info(f"  [SUCCESS] Got content for {url}")
+                    website_contents.append({'title': title, 'link': url, 'content': content})
+                    successful_website_count += 1
+                else:
+                    logger.warning(f"  [FAILED/BLOCKED] Could not get content for {url}")
+                    blocked_urls.append(url)
+                    blocked_website_count += 1
         except Exception as e:
             logger.error(f"  [ERROR] Unexpected error processing result {url}: {e}", exc_info=True)
             if is_youtube: failed_youtube_urls.append(url); failed_youtube_count += 1
@@ -328,6 +389,83 @@ If you done a great job, you will get a 100k bonus this year. If not a cat will 
         logger.error(f"Summary generation failed: {e}", exc_info=True)
         # Return error within the summary field for consistency in the dict structure
         return f"Error: Failed to generate summary. {str(e)}"
+
+
+FOLLOW_UP_MAX_SOURCE_CHARS = 80000
+
+
+def build_follow_up_messages(
+    question: str,
+    original_query: str,
+    summary: str,
+    combined_raw_text: str,
+    conversation: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
+    """
+    Input: Follow-up question, original search context, prior Q&A turns.
+    Process: Builds chat messages grounded in the first search's summary and sources.
+    Output: Message list ready for the LLM API.
+    """
+    source_context = combined_raw_text or ""
+    if len(source_context) > FOLLOW_UP_MAX_SOURCE_CHARS:
+        source_context = source_context[:FOLLOW_UP_MAX_SOURCE_CHARS] + "\n\n[Source content truncated for follow-up context]"
+
+    system_prompt = f"""You are answering follow-up questions about a search the user already ran.
+
+Original query: {original_query}
+
+Initial summary:
+{summary or "No summary was generated."}
+
+Source material from that search:
+{source_context or "No source text was saved."}
+
+Rules:
+- Answer only from the summary and sources above.
+- If the context is not enough, say so clearly — do not invent facts.
+- Be direct and concise. Use markdown when helpful.
+- Cite source URLs when you reference specific details."""
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    if conversation:
+        messages.extend(conversation)
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def follow_up(
+    question: str,
+    original_query: str,
+    summary: str,
+    combined_raw_text: str,
+    conversation: Optional[List[Dict[str, str]]] = None,
+    model: Optional[str] = None,
+) -> str:
+    """
+    Input: Follow-up question and context from a completed search.
+    Process: Answers using saved sources — no new web search.
+    Output: Assistant reply string, or error message.
+    """
+    if model is None:
+        model = get_app_default_model("search")
+
+    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_api_key:
+        return "Error: OPENROUTER_API_KEY is not set."
+
+    messages = build_follow_up_messages(
+        question=question,
+        original_query=original_query,
+        summary=summary or "",
+        combined_raw_text=combined_raw_text or "",
+        conversation=conversation,
+    )
+
+    try:
+        return _get_llm_chat_response(messages, model, openrouter_api_key)
+    except Exception as e:
+        logger.error(f"Follow-up failed for query '{original_query}': {e}", exc_info=True)
+        return f"Error: Failed to answer follow-up. {str(e)}"
 
 
 # --- The Public Search Function ---
